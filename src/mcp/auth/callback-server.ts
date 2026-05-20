@@ -3,6 +3,18 @@
  *
  * Starts on an OS-assigned port, waits for a single callback with an authorization
  * code, then shuts down. Used during the MCP OAuth browser-based authorization flow.
+ *
+ * Security note: HTTP is intentionally used here, not HTTPS.
+ * RFC 8252 §8.3 (OAuth 2.0 for Native Apps) explicitly permits plain HTTP for
+ * loopback (127.0.0.1 / localhost) redirect URIs because:
+ *   - The server binds exclusively to the loopback interface (no network exposure).
+ *   - HTTPS on localhost requires a self-signed certificate that browsers reject with
+ *     a security warning, degrading the OAuth UX and breaking many provider configs.
+ *   - The authorization code received is a short-lived, single-use value that is
+ *     immediately exchanged for tokens; it is not a long-lived secret.
+ *   - All major OAuth providers (Google, GitHub, etc.) whitelist http://localhost
+ *     redirect URIs per the same RFC guidance.
+ * The SAST finding Javascript/HttpToHttps is suppressed for this file in .snyk.
  */
 
 import { createServer, type Server } from 'http';

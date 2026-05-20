@@ -1,0 +1,16 @@
+# Snyk (https://snyk.io) policy file
+version: v1.25.0
+
+ignore:
+  javascript/HttpToHttps:
+    - 'src/mcp/auth/callback-server.ts':
+        reason: >
+          Localhost-only ephemeral OAuth callback server. HTTP is appropriate per
+          RFC 8252 §8.3 for loopback interface redirect URIs. The server binds
+          exclusively to localhost (not a network interface), uses an OS-assigned
+          ephemeral port, and handles only short-lived single-use authorization
+          codes. HTTPS would require a self-signed certificate causing browser
+          trust warnings and breaking standard OAuth provider configurations.
+        expires: '2027-05-20T00:00:00.000Z'
+        created: '2026-05-20T00:00:00.000Z'
+        source: developer
