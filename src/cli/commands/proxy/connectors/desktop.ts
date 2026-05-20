@@ -1,6 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import https from 'https';
 import { randomUUID } from 'node:crypto';
 import { getClaudeDesktopBaseDir } from '@/telemetry/clients/claude-desktop/claude-desktop.paths.js';
 import { ConfigurationError } from '@/utils/errors.js';
@@ -56,12 +57,50 @@ export const DEFAULT_COWORK_EGRESS_ALLOWED_HOSTS = ['*'] as const;
 export const DEFAULT_MANAGED_MCP_SERVERS =
   managedMcpServers as readonly ManagedMcpServerEntry[];
 
+interface ProxyResponse {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  json(): Promise<unknown>;
+}
+
+async function fetchThroughProxy(endpoint: string, headers: Record<string, string>, certPath?: string): Promise<ProxyResponse> {
+  if (endpoint.startsWith('https://') && certPath) {
+    const url = new URL(endpoint);
+    const cert = await readFile(certPath);
+    const agent = new https.Agent({ ca: cert });
+    return new Promise<ProxyResponse>((resolve, reject) => {
+      const req = https.request(
+        { hostname: url.hostname, port: url.port || '443', path: url.pathname + url.search, method: 'GET', headers, agent },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf8');
+            resolve({
+              ok: (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300,
+              status: res.statusCode ?? 0,
+              statusText: res.statusMessage ?? '',
+              json: () => Promise.resolve(JSON.parse(body)),
+            });
+          });
+          res.on('error', reject);
+        }
+      );
+      req.on('error', reject);
+      req.end();
+    });
+  }
+  const r = await fetch(endpoint, { headers });
+  return { ok: r.ok, status: r.status, statusText: r.statusText, json: () => r.json() as Promise<unknown> };
+}
+
 /**
  * Fetch the model list from the gateway's SSO-backed `/v1/llm_models?include_all=true`
  * endpoint and return the IDs of usable Claude-family models (excludes `-vertex`
  * aliases since the gateway already picks the right backend for the canonical names).
  */
-export async function fetchClaudeModels(proxyUrl: string, gatewayKey: string): Promise<string[]> {
+export async function fetchClaudeModels(proxyUrl: string, gatewayKey: string, certPath?: string): Promise<string[]> {
   const endpoint = new URL('/v1/llm_models?include_all=true', proxyUrl).toString();
   try {
     logger.info(
@@ -73,9 +112,11 @@ export async function fetchClaudeModels(proxyUrl: string, gatewayKey: string): P
         preferredModels: [...PREFERRED_CLAUDE_MODELS],
       })
     );
-    const response = await fetch(new URL('/v1/llm_models?include_all=true', proxyUrl), {
-      headers: { Authorization: `Bearer ${gatewayKey}` },
-    });
+    const response = await fetchThroughProxy(
+      new URL('/v1/llm_models?include_all=true', proxyUrl).toString(),
+      { Authorization: `Bearer ${gatewayKey}` },
+      certPath
+    );
     if (!response.ok) {
       logger.warn(
         '[proxy] Gateway model discovery failed',
@@ -289,9 +330,11 @@ export async function getDesktopConfigPath(baseDir: string = getDesktopBaseDir()
 export async function writeDesktopConfig(
   proxyUrl: string,
   gatewayKey: string,
-  baseDir: string = getDesktopBaseDir()
+  baseDir?: string,
+  certPath?: string
 ): Promise<string> {
-  const libDir = join(baseDir, 'configLibrary');
+  const resolvedBaseDir = baseDir ?? getDesktopBaseDir();
+  const libDir = join(resolvedBaseDir, 'configLibrary');
   if (!existsSync(libDir)) {
     await mkdir(libDir, { recursive: true });
   }
@@ -320,7 +363,7 @@ export async function writeDesktopConfig(
 
   // Discover available Claude models from the gateway and curate down to the
   // preferred set so the user doesn't have to type them manually in the GUI.
-  const discoveredModels = await fetchClaudeModels(proxyUrl, gatewayKey);
+  const discoveredModels = await fetchClaudeModels(proxyUrl, gatewayKey, certPath);
   if (discoveredModels.length === 0) {
     throw new ConfigurationError(
       `Local proxy did not expose any Claude models from ${new URL('/v1/llm_models?include_all=true', proxyUrl).toString()}.`

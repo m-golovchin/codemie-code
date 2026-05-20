@@ -498,7 +498,7 @@ class MCPAuthInterceptor implements ProxyInterceptor {
     // Set proxy base URL on first request
     if (!this.proxyBaseUrl) {
       const proxyPort = this.pluginContext.config.port;
-      this.proxyBaseUrl = `http://localhost:${proxyPort}`;
+      this.proxyBaseUrl = `https://localhost:${proxyPort}`;
     }
 
     // Extract original URL from query string
@@ -623,7 +623,7 @@ class MCPAuthInterceptor implements ProxyInterceptor {
         // We don't have the full original URL, but the proxy base URL is set.
         if (!this.proxyBaseUrl) {
           const proxyPort = this.pluginContext.config.port;
-          this.proxyBaseUrl = `http://localhost:${proxyPort}`;
+          this.proxyBaseUrl = `https://localhost:${proxyPort}`;
         }
       }
     }

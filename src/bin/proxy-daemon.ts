@@ -105,7 +105,7 @@ process.on('SIGTERM', async () => { await cleanup(); process.exit(0); });
 process.on('SIGINT',  async () => { await cleanup(); process.exit(0); });
 
 try {
-  const { port: actualPort, url } = await proxy.start();
+  const { port: actualPort, url, certPath } = await proxy.start();
 
   if (config.telemetryMode === 'claude-desktop') {
     telemetryRuntime = new DesktopTelemetryRuntime(
@@ -129,6 +129,7 @@ try {
     pid: process.pid,
     port: actualPort,
     url,
+    certPath,
     profile,
     gatewayKey,
     targetUrl: config.targetApiUrl,

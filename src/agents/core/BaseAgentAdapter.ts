@@ -891,11 +891,12 @@ export abstract class BaseAgentAdapter implements AgentAdapter {
 
       // Create and start the proxy
       this.proxy = new CodeMieProxy(config);
-      const { url } = await this.proxy.start();
+      const { url, certPath } = await this.proxy.start();
 
       // Update environment with proxy URL
       env.CODEMIE_BASE_URL = url;
       env.CODEMIE_API_KEY = 'proxy-handled';
+      env.NODE_EXTRA_CA_CERTS = certPath;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new Error(`Proxy setup failed: ${errorMessage}`);

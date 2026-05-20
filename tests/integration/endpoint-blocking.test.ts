@@ -21,8 +21,13 @@ describe('Endpoint Blocking Integration', () => {
   let proxyUrl: string;
   let upstreamCallCount = 0;
   let mockUpstreamServer: http.Server;
+  let originalTlsReject: string | undefined;
 
   beforeEach(async () => {
+    // Disable TLS verification for self-signed proxy cert in integration tests
+    originalTlsReject = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
     // Reset counter
     upstreamCallCount = 0;
 
@@ -55,6 +60,13 @@ describe('Endpoint Blocking Integration', () => {
   });
 
   afterEach(async () => {
+    // Restore original TLS verification setting
+    if (originalTlsReject === undefined) {
+      delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    } else {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = originalTlsReject;
+    }
+
     await proxy.stop();
     await new Promise<void>((resolve) => {
       mockUpstreamServer.close(() => resolve());

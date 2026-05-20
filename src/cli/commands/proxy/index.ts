@@ -309,7 +309,7 @@ export function createProxyCommand(): Command {
           );
         }
 
-        const configPath = await writeDesktopConfig(state!.url, state!.gatewayKey);
+        const configPath = await writeDesktopConfig(state!.url, state!.gatewayKey, undefined, state!.certPath);
         logger.info(
           '[proxy] Claude Desktop proxy configuration written',
           ...sanitizeLogArgs({
