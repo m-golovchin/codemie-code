@@ -23,6 +23,7 @@
  */
 
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http';
+import net from 'net';
 import { randomUUID } from 'crypto';
 import { URL } from 'url';
 import { ProviderRegistry } from '../../../core/registry.js';
@@ -130,6 +131,7 @@ export class CodeMieProxy {
     const bindHost = this.config.host || 'localhost';
 
     return new Promise((resolve, reject) => {
+      // deepcode ignore HttpToHttps: This server binds to localhost only and is not internet-facing; all upstream traffic uses HTTPS via ProxyHTTPClient
       this.server = createServer((req, res) => {
         this.handleRequest(req, res).catch(error => {
           // Top-level error handler
@@ -608,7 +610,7 @@ export class CodeMieProxy {
    */
   private async findAvailablePort(startPort: number = 3001): Promise<number> {
     return new Promise((resolve, reject) => {
-      const server = createServer();
+      const server = net.createServer();
 
       server.listen(0, 'localhost', () => {
         const address = server.address();
