@@ -12,6 +12,7 @@ export interface DaemonState {
   url: string;
   profile: string;
   gatewayKey: string;
+  certPath?: string;
   telemetryMode?: 'none' | 'claude-desktop';
   targetUrl?: string;
   provider?: string;

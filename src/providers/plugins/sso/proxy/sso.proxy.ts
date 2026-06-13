@@ -22,7 +22,10 @@
  * NO BUFFERING by default!
  */
 
-import { createServer, Server, IncomingMessage, ServerResponse } from 'http';
+import https from 'https';
+import { IncomingMessage, ServerResponse } from 'http';
+import net from 'net';
+import { getOrGenerateProxyCert } from './proxy-tls.js';
 import { randomUUID } from 'crypto';
 import { URL } from 'url';
 import { ProviderRegistry } from '../../../core/registry.js';
@@ -40,7 +43,7 @@ import './plugins/index.js'; // Auto-register core plugins
  * KISS: Core responsibility = forward requests + run plugin hooks
  */
 export class CodeMieProxy {
-  private server: Server | null = null;
+  private server: https.Server | null = null;
   private httpClient: ProxyHTTPClient;
   private interceptors: ProxyInterceptor[] = [];
   private actualPort: number = 0;
@@ -57,7 +60,7 @@ export class CodeMieProxy {
   /**
    * Start the proxy server
    */
-  async start(): Promise<{ port: number; url: string }> {
+  async start(): Promise<{ port: number; url: string; certPath: string }> {
     // 1. Detect auth method from config
     const authMethod = this.config.authMethod || 'sso';  // Default: SSO for backward compat
 
@@ -130,8 +133,10 @@ export class CodeMieProxy {
 
     const bindHost = this.config.host || 'localhost';
 
+    const { key, cert, certPath } = await getOrGenerateProxyCert();
+
     return new Promise((resolve, reject) => {
-      this.server = createServer((req, res) => {
+      this.server = https.createServer({ key, cert }, (req, res) => {
         this.handleRequest(req, res).catch(error => {
           // Top-level error handler
           if (!res.headersSent) {
@@ -177,7 +182,7 @@ export class CodeMieProxy {
         this.config.port = this.actualPort;
         this.startedAt = new Date().toISOString();
 
-        const gatewayUrl = `http://${bindHost}:${this.actualPort}`;
+        const gatewayUrl = `https://${bindHost}:${this.actualPort}`;
         logger.debug(`Proxy started: ${gatewayUrl}`);
 
         // Start plugin lifecycles only after the final bound port is known.
@@ -186,7 +191,7 @@ export class CodeMieProxy {
         this.runHook('onProxyStart', interceptor =>
           interceptor.onProxyStart?.()
         )
-          .then(() => resolve({ port: this.actualPort, url: gatewayUrl }))
+          .then(() => resolve({ port: this.actualPort, url: gatewayUrl, certPath }))
           .catch(reject);
       });
     });
@@ -648,7 +653,7 @@ export class CodeMieProxy {
    */
   private async findAvailablePort(startPort: number = 3001): Promise<number> {
     return new Promise((resolve, reject) => {
-      const server = createServer();
+      const server = net.createServer();
 
       server.listen(0, 'localhost', () => {
         const address = server.address();

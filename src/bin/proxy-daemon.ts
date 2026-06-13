@@ -129,7 +129,7 @@ process.on('SIGTERM', async () => { await cleanup(); process.exit(0); });
 process.on('SIGINT',  async () => { await cleanup(); process.exit(0); });
 
 try {
-  const { port: actualPort, url } = await proxy.start();
+  const { port: actualPort, url, certPath } = await proxy.start();
 
   // Pin future restarts to the port we actually bound. The initial bind may
   // have fallen back to a random port if 4001 was busy; recovery must reuse
@@ -160,6 +160,7 @@ try {
     pid: process.pid,
     port: actualPort,
     url,
+    certPath,
     profile,
     gatewayKey,
     targetUrl: config.targetApiUrl,
