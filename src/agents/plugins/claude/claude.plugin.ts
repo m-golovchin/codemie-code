@@ -1,4 +1,8 @@
-import { AgentMetadata } from '../../core/types.js';
+import type {
+  AgentMetadata,
+  ResumeOwnershipInput,
+  ResumeOwnershipResult,
+} from '../../core/types.js';
 import { BaseAgentAdapter } from '../../core/BaseAgentAdapter.js';
 import { ClaudeSessionAdapter } from './claude.session.js';
 import type { SessionAdapter } from '../../core/session/BaseSessionAdapter.js';
@@ -14,7 +18,7 @@ import {
 import { logger } from '../../../utils/logger.js';
 import { sanitizeLogArgs } from '../../../utils/security.js';
 import chalk from 'chalk';
-import { resolveHomeDir, getDirname } from '../../../utils/paths.js';
+import { resolveHomeDir } from '../../../utils/paths.js';
 import {
   detectInstallationMethod,
   type InstallationMethod,
@@ -30,17 +34,17 @@ let statuslineManagedThisSession = false;
  *
  * **UPDATE THIS WHEN BUMPING CLAUDE VERSION**
  */
-const CLAUDE_SUPPORTED_VERSION = '2.1.114';
+export const CLAUDE_SUPPORTED_VERSION = '2.1.204';
 
 /**
  * Minimum supported Claude Code version
  * Versions below this are known to be incompatible and will be blocked from starting
  * Rule: always 10 patch versions below CLAUDE_SUPPORTED_VERSION
- * e.g. supported = 2.1.114 → minimum = 2.1.104
+ * e.g. supported = 2.1.199 → minimum = 2.1.189
  *
  * **UPDATE THIS WHEN BUMPING CLAUDE VERSION**
  */
-const CLAUDE_MINIMUM_SUPPORTED_VERSION = '2.1.104';
+const CLAUDE_MINIMUM_SUPPORTED_VERSION = '2.1.189';
 
 /**
  * Claude Code installer URLs
@@ -62,6 +66,8 @@ export const ClaudePluginMetadata: AgentMetadata = {
 
   npmPackage: '@anthropic-ai/claude-code',
   cliCommand: 'claude',
+
+  sessionAnalyticsReport: true,
 
   // Version management configuration
   supportedVersion: CLAUDE_SUPPORTED_VERSION,       // Latest version tested with CodeMie backend
@@ -98,6 +104,18 @@ export const ClaudePluginMetadata: AgentMetadata = {
       type: 'flag',
       target: '-p',
     },
+    '--resume': {
+      type: 'flag',
+      target: '-r',
+    },
+  },
+
+  reasoningEffort: {
+    strategy: 'cli-flag',
+    flag: '--effort',
+    placement: 'append',
+    supportedLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    userOverrideFlags: ['--effort'],
   },
 
   // Metrics configuration: exclude Bash tool errors from API metrics
@@ -168,7 +186,7 @@ export const ClaudePluginMetadata: AgentMetadata = {
       }
 
       if (!env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) {
-        let autocompactPct = 80;
+        let autocompactPct = 85;
         if (env.CODEMIE_PROFILE_CONFIG) {
           try {
             const profileConfig = JSON.parse(env.CODEMIE_PROFILE_CONFIG);
@@ -182,67 +200,24 @@ export const ClaudePluginMetadata: AgentMetadata = {
         env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(autocompactPct);
       }
 
-      // Statusline setup: when --status flag is passed, configure Claude Code
-      // status bar with a multi-line display showing model, context, git, cost
+      // Statusline setup: when --status is passed, ensure the CodeMie statusline is
+      // installed — the same installer `codemie install statusline` uses, so there is
+      // exactly one statusline implementation instead of a separate duplicated one here.
       // https://code.claude.com/docs/en/statusline
       if (env.CODEMIE_STATUS === '1') {
-        const { writeFile, readFile, mkdir, chmod } = await import('fs/promises');
-        const { existsSync } = await import('fs');
-        const { join } = await import('path');
-
-        const claudeHome = resolveHomeDir('.claude');
-        const scriptPath = join(claudeHome, 'codemie-statusline.mjs');
-        const settingsPath = join(claudeHome, 'settings.json');
-
-        // Read the statusline script from the compiled output directory
-        const scriptContent = await readFile(
-          join(getDirname(import.meta.url), 'plugin/codemie-statusline.mjs'),
-          'utf-8'
-        );
-
-        // Ensure ~/.claude directory exists
-        if (!existsSync(claudeHome)) {
-          await mkdir(claudeHome, { recursive: true });
-        }
-
-        // Write script (always update to latest version)
-        await writeFile(scriptPath, scriptContent, 'utf-8');
-
-        // Make script executable on Unix systems
-        if (process.platform !== 'win32') {
-          await chmod(scriptPath, 0o755);
-        }
-
-        // Inject statusLine into ~/.claude/settings.json if not already configured
-        let settings: Record<string, unknown> = {};
-        if (existsSync(settingsPath)) {
-          try {
-            const raw = await readFile(settingsPath, 'utf-8');
-            settings = JSON.parse(raw) as Record<string, unknown>;
-          } catch (parseError) {
-            // Abort injection to prevent overwriting potentially valid settings
-            // that are temporarily unreadable (e.g., concurrent write, partial flush)
-            logger.warn(
-              '[Claude] Could not parse settings.json, skipping statusline injection to avoid data loss',
-              ...sanitizeLogArgs({
-                settingsPath,
-                error: parseError instanceof Error ? parseError.message : String(parseError),
-              })
-            );
-            return env;
-          }
-        }
-
-        if (!settings.statusLine) {
-          settings.statusLine = {
-            type: 'command',
-            // Quote the path to handle spaces in home directory (e.g. /Users/John Doe/)
-            command: `node "${scriptPath}"`,
-          };
-          await writeFile(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-          // Use module-level flag (not env var) to avoid leaking into subprocess env
-          statuslineManagedThisSession = true;
-          logger.debug('[Claude] Statusline configured', { scriptPath });
+        try {
+          const { installStatusline } = await import('./statusline-installer.js');
+          const { alreadyConfigured } = await installStatusline();
+          // Only clean up on afterRun if THIS session enabled it — a persistent
+          // `codemie install statusline` setup must survive after the session ends.
+          statuslineManagedThisSession = !alreadyConfigured;
+        } catch (error) {
+          logger.warn(
+            '[Claude] Failed to configure statusline via --status flag',
+            ...sanitizeLogArgs({
+              error: error instanceof Error ? error.message : String(error),
+            })
+          );
         }
       }
 
@@ -304,6 +279,23 @@ export class ClaudePlugin extends BaseAgentAdapter {
    */
   getSessionAdapter(): SessionAdapter {
     return this.sessionAdapter;
+  }
+
+  async resolveResumeOwnership(
+    input: ResumeOwnershipInput,
+  ): Promise<ResumeOwnershipResult> {
+    const { scanSessionsForClaudeId } = await import('../../core/session/session-ownership.js');
+    const owned = scanSessionsForClaudeId(input.resumeId);
+
+    return {
+      supported: true,
+      owned,
+      fallbackResumeCommand: `claude --resume ${input.resumeId}`,
+      auditData: {
+        nativeAgent: 'claude',
+        nativeResumeId: input.resumeId,
+      },
+    };
   }
 
   /**

@@ -26,6 +26,7 @@ import { createServer, Server, IncomingMessage, ServerResponse } from 'http';
 import { randomUUID } from 'crypto';
 import { URL } from 'url';
 import { ProviderRegistry } from '../../../core/registry.js';
+import { AuthMethod } from '../../../core/types.js';
 import type { JWTCredentials, SSOCredentials } from '../../../core/types.js';
 import { logger } from '../../../../utils/logger.js';
 import { ProxyHTTPClient } from './proxy-http-client.js';
@@ -44,6 +45,7 @@ export class CodeMieProxy {
   private httpClient: ProxyHTTPClient;
   private interceptors: ProxyInterceptor[] = [];
   private actualPort: number = 0;
+  private startedAt: string = '';
 
   constructor(private config: ProxyConfig) {
     // Initialize HTTP client with streaming support
@@ -58,13 +60,13 @@ export class CodeMieProxy {
    */
   async start(): Promise<{ port: number; url: string }> {
     // 1. Detect auth method from config
-    const authMethod = this.config.authMethod || 'sso';  // Default: SSO for backward compat
+    const authMethod = this.config.authMethod || AuthMethod.SSO;  // Default: SSO for backward compat
 
     // 2. Load credentials based on auth method
     let credentials: SSOCredentials | JWTCredentials | null = null;
     let syncCredentials: SSOCredentials | JWTCredentials | null = null;
 
-    if (authMethod === 'jwt') {
+    if (authMethod === AuthMethod.JWT) {
       // JWT path: token from CLI arg, env var, or credential store
       const token = this.config.jwtToken
         || process.env.CODEMIE_JWT_TOKEN
@@ -139,11 +141,28 @@ export class CodeMieProxy {
         });
       });
 
+      let eaddrinuseRetries = 0;
+      const maxEaddrinuseRetries = 5;
       this.server.on('error', (error: any) => {
         if (error.code === 'EADDRINUSE') {
-          // Try a different random port
-          this.actualPort = 0; // Let system assign
-          this.server?.listen(this.actualPort, bindHost);
+          if (this.config.pinnedPort) {
+            // Recovery path: the daemon must reclaim the SAME port so Claude
+            // Desktop's fixed gateway URL keeps working. Retry with backoff
+            // instead of silently moving to a random port.
+            if (eaddrinuseRetries >= maxEaddrinuseRetries) {
+              this.server?.close();
+              reject(new NetworkError(
+                `Port ${this.actualPort} still in use after ${maxEaddrinuseRetries} retries`
+              ));
+              return;
+            }
+            eaddrinuseRetries++;
+            setTimeout(() => this.server?.listen(this.actualPort, bindHost), 200);
+          } else {
+            // Initial-bind path: a random fallback port is acceptable.
+            this.actualPort = 0; // Let system assign
+            this.server?.listen(this.actualPort, bindHost);
+          }
         } else {
           reject(error);
         }
@@ -157,6 +176,7 @@ export class CodeMieProxy {
 
         // Propagate actual port to config so plugins (e.g., MCP auth) get the real port
         this.config.port = this.actualPort;
+        this.startedAt = new Date().toISOString();
 
         const gatewayUrl = `http://${bindHost}:${this.actualPort}`;
         logger.debug(`Proxy started: ${gatewayUrl}`);
@@ -185,6 +205,11 @@ export class CodeMieProxy {
     // 2. Stop server
     if (this.server) {
       await new Promise<void>((resolve) => {
+        // Force-drain keep-alive sockets (e.g. Claude Desktop's persistent
+        // connection) first; otherwise server.close() does not invoke its
+        // callback until those connections idle out, which would hang the
+        // daemon's in-process restart indefinitely.
+        this.server!.closeAllConnections?.();
         this.server!.close(() => {
           logger.debug('[CodeMieProxy] Stopped');
           resolve();
@@ -214,6 +239,20 @@ export class CodeMieProxy {
     res: ServerResponse
   ): Promise<void> {
     const startTime = Date.now();
+
+    // Liveness probe — answered before auth and before any plugin hook.
+    // No upstream call, no token required. Used by `proxy status`, `connect`,
+    // and the in-daemon ProxyWatcher to detect a dead socket.
+    if (req.method === 'GET' && (req.url === '/health' || req.url === '/healthz')) {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        status: 'ok',
+        port: this.actualPort,
+        startedAt: this.startedAt,
+      }));
+      return;
+    }
 
     try {
       // 1. Build context
@@ -249,10 +288,12 @@ export class CodeMieProxy {
 
       // 2.5. Check if request was blocked by any interceptor
       if (context.metadata.blocked) {
-        // Request blocked - return 200 OK immediately without forwarding
+        const body = typeof context.metadata.blockedResponseBody === 'string'
+          ? context.metadata.blockedResponseBody
+          : JSON.stringify({ success: true });
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ success: true }));
+        res.end(body);
         logger.debug(`[proxy] Request blocked: ${context.url}`);
         return;
       }
@@ -302,6 +343,11 @@ export class CodeMieProxy {
         statusCode: metadata.statusCode,
         bytesSent: metadata.bytesSent
       });
+
+      // Diagnostic: warn on Bedrock 4xx to surface modify_params misconfiguration
+      if (metadata.statusCode >= 400) {
+        this.logBedrockUpstreamError(context, metadata.statusCode);
+      }
 
       // 6. Run onResponseComplete hooks (AFTER streaming)
       logger.debug(`[proxy] Running onResponseComplete hooks for ${context.requestId}`);
@@ -600,6 +646,31 @@ export class CodeMieProxy {
       logger.debug(`[proxy] Operational error: ${proxyError.message}`);
     } else {
       logger.error('[proxy] Error:', proxyError);
+    }
+  }
+
+  /**
+   * Emit a structured warn when a Bedrock request returns 4xx.
+   * Helps admins diagnose UnsupportedParamsError caused by missing
+   * litellm_settings.modify_params: true in the LiteLLM proxy config.
+   */
+  private logBedrockUpstreamError(context: ProxyContext, statusCode: number): void {
+    try {
+      const body = JSON.parse(context.requestBody?.toString() ?? '{}');
+      const model = typeof body.model === 'string' ? body.model : undefined;
+      if (
+        model &&
+        (model.startsWith('bedrock/') || model.includes('amazon') || model.includes('qwen'))
+      ) {
+        logger.warn(
+          `[proxy] Upstream returned ${statusCode} for Bedrock model "${model}". ` +
+          `If cause is UnsupportedParamsError, ensure litellm_settings.modify_params: true ` +
+          `is configured and the LiteLLM proxy has been restarted.`,
+          { requestId: context.requestId, model, statusCode }
+        );
+      }
+    } catch {
+      // diagnostic only — never throws
     }
   }
 

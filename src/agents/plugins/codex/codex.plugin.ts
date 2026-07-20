@@ -109,12 +109,19 @@ export const CodexPluginMetadata: AgentMetadata = {
   npmPackage: '@openai/codex',
   cliCommand: process.env.CODEMIE_CODEX_BIN || 'codex',
 
+  sessionAnalyticsReport: true,
+
   // Version management configuration
   supportedVersion: CODEX_SUPPORTED_VERSION,       // Latest version tested with CodeMie backend
   minimumSupportedVersion: CODEX_MINIMUM_SUPPORTED_VERSION, // Minimum version required to run
 
   dataPaths: {
     home: '.codex', // ~/.codex is fixed for Codex (no XDG convention)
+  },
+  extensionsConfig: {
+    project: '.codex',
+    global: '~/.codex',
+    skillsEntryFile: 'SKILL.md',
   },
   envMapping: {
     // CODEMIE_BASE_URL → OPENAI_BASE_URL (read natively by Codex)
@@ -134,6 +141,15 @@ export const CodexPluginMetadata: AgentMetadata = {
   ssoConfig: {
     enabled: true,
     clientType: 'codemie-codex',
+  },
+
+  reasoningEffort: {
+    strategy: 'cli-config',
+    configFlag: '--config',
+    configKey: 'model_reasoning_effort',
+    placement: 'prepend',
+    supportedLevels: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+    userOverrideFlags: ['model_reasoning_effort'],
   },
 
   lifecycle: {
@@ -235,17 +251,28 @@ export const CodexPluginMetadata: AgentMetadata = {
     enrichArgs(args: string[], config: AgentConfig) {
       let enriched = args;
 
-      // 1. Transform --task <value> → exec <value> (non-interactive subcommand)
+      // 1. Handle --resume and --task to build the correct subcommand.
+      const resumeIdx = enriched.indexOf('--resume');
+      const resumeId = resumeIdx !== -1 && resumeIdx < enriched.length - 1
+        ? enriched[resumeIdx + 1]
+        : undefined;
+
+      // Strip --resume <id> pair before subcommand construction
+      if (resumeId) {
+        enriched = [...enriched.slice(0, resumeIdx), ...enriched.slice(resumeIdx + 2)];
+      }
+
       const taskIndex = enriched.indexOf('--task');
       if (taskIndex !== -1 && taskIndex < enriched.length - 1) {
         const taskValue = enriched[taskIndex + 1];
-        enriched = [
-          'exec',
-          ...enriched.slice(0, taskIndex),
-          ...enriched.slice(taskIndex + 2),
-          taskValue,
-        ];
+        const rest = [...enriched.slice(0, taskIndex), ...enriched.slice(taskIndex + 2)];
+        const head = resumeId ? ['exec', 'resume', resumeId] : ['exec'];
+        enriched = [...head, ...rest, taskValue];
+      } else if (resumeId) {
+        // Interactive resume: no --task present → top-level codex resume <id>
+        enriched = ['resume', resumeId, ...enriched];
       }
+      // else: no --task, no --resume → existing interactive behavior (unchanged)
 
       // 2. Inject model via --model when not already overridden.
       const explicitModel = getExplicitModelArg(enriched);
@@ -480,6 +507,21 @@ export class CodexPlugin extends BaseAgentAdapter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Recognize Codex's native positional `resume <id>` invocation (e.g. as
+   * suggested by Codex's own CLI output) so AgentCLI can apply the same
+   * resume ownership check it applies to the CodeMie `--resume <id>` flag.
+   * `codex resume` with no id opens Codex's own session picker and has no
+   * id to validate, so it is left unrecognized here.
+   */
+  extractNativeResumeId(args: string[]): string | undefined {
+    const [first, second] = args;
+    if (first === 'resume' && second && !second.startsWith('-')) {
+      return second;
+    }
+    return undefined;
   }
 
   protected override async setupProxy(env: NodeJS.ProcessEnv): Promise<void> {

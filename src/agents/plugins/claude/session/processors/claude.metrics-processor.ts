@@ -15,7 +15,9 @@ import type { SessionProcessor, ProcessingContext, ProcessingResult } from '../.
 import type { ParsedSession } from '../../../../core/session/BaseSessionAdapter.js';
 import { logger } from '../../../../../utils/logger.js';
 import type { MetricDelta } from '../../../../core/metrics/types.js';
-import { extractFormat, detectLanguage } from '../../../../../utils/file-operations.js';
+import { extractClaudeFileOperation } from '../claude-file-operation.js';
+import { extractNamedInvocations } from '../claude-named-invocations.js';
+import { stripClear } from '../strip-clear.js';
 
 export class MetricsProcessor implements SessionProcessor {
   readonly name = 'metrics';
@@ -149,12 +151,14 @@ export class MetricsProcessor implements SessionProcessor {
    * Extract deltas from Claude messages
    */
   private extractDeltasFromMessages(
-    messages: any[],
+    rawMessages: any[],
     sessionId: string,
     agentName: string,
     processedIds: Set<string>,
     attachedUserPrompts: Set<string>
   ): Array<Omit<MetricDelta, 'syncStatus' | 'syncAttempts'>> {
+    const messages = stripClear(rawMessages) as any[];
+
     const deltas: Array<Omit<MetricDelta, 'syncStatus' | 'syncAttempts'>> = [];
     const messagesByUuid = new Map<string, any>();
 
@@ -194,9 +198,17 @@ export class MetricsProcessor implements SessionProcessor {
       }
     }
 
-    // Build user prompts map: uuid → text content
+    let lastProcessedMsgIndex = -1;
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.message?.role === 'assistant' && msg.message?.id && processedIds.has(msg.message.id)) {
+        lastProcessedMsgIndex = i;
+      }
+    }
+
     const userPromptsMap = new Map<string, string>();
-    for (const msg of messages) {
+    for (let i = lastProcessedMsgIndex + 1; i < messages.length; i++) {
+      const msg = messages[i];
       if (
         msg.message?.role === 'user' &&
         msg.uuid &&
@@ -220,6 +232,11 @@ export class MetricsProcessor implements SessionProcessor {
         }
       }
     }
+
+    // Named invocations (skill/agent/command names) are session-wide: skills/agents come from
+    // tool_use input and commands from user-message XML. We extract once via the shared helper
+    // and attach to the first delta (the aggregator sums across deltas, so totals are unchanged).
+    const sessionNamed = extractNamedInvocations(messages);
 
     // Group messages by message.id to handle streaming chunks
     // Claude streaming creates multiple JSONL entries (thinking, text, tool_use)
@@ -291,7 +308,7 @@ export class MetricsProcessor implements SessionProcessor {
 
                 // Extract file operations
                 const toolUseResult = toolUseResultMap.get(block.id);
-                const fileOp = this.extractFileOperation(toolName, block.input, toolUseResult);
+                const fileOp = extractClaudeFileOperation(toolName, block.input, toolUseResult);
                 if (fileOp) {
                   fileOperations.push(fileOp);
                 }
@@ -303,6 +320,10 @@ export class MetricsProcessor implements SessionProcessor {
 
       const recordId = messages[0].uuid;
 
+      const apiErrorMessage = completedMsg.isApiErrorMessage && completedMsg.message?.content?.[0]?.text
+        ? completedMsg.message.content[0].text
+        : undefined;
+
       const delta: Omit<MetricDelta, 'syncStatus' | 'syncAttempts'> = {
         recordId,
         sessionId,
@@ -311,7 +332,12 @@ export class MetricsProcessor implements SessionProcessor {
         gitBranch: completedMsg.gitBranch,
         ...(Object.keys(tools).length > 0 && { tools }),
         ...(Object.keys(toolStatus).length > 0 && { toolStatus }),
-        ...(completedMsg.message?.model && { models: [completedMsg.message.model] })
+        ...(completedMsg.message?.model && { models: [completedMsg.message.model] }),
+        ...(apiErrorMessage && { apiErrorMessage }),
+        // Named invocations are session-wide — attach all three to the first delta only.
+        ...(deltas.length === 0 && Object.keys(sessionNamed.skillInvocations).length > 0 && { skillInvocations: sessionNamed.skillInvocations }),
+        ...(deltas.length === 0 && Object.keys(sessionNamed.agentInvocations).length > 0 && { agentInvocations: sessionNamed.agentInvocations }),
+        ...(deltas.length === 0 && Object.keys(sessionNamed.commandInvocations).length > 0 && { commandInvocations: sessionNamed.commandInvocations })
       };
 
       if (fileOperations.length > 0) {
@@ -360,62 +386,4 @@ export class MetricsProcessor implements SessionProcessor {
     return this.isToolResultMessage(parent);
   }
 
-  /**
-   * Extract file operation from tool call (simplified version of legacy logic)
-   */
-  private extractFileOperation(
-    toolName: string,
-    input: any,
-    toolUseResult?: any
-  ): { type: string; path?: string; format?: string; language?: string; pattern?: string; linesAdded?: number; linesRemoved?: number } | undefined {
-    const typeMap: Record<string, string> = {
-      'Read': 'read',
-      'Write': 'write',
-      'Edit': 'edit',
-      'Grep': 'grep',
-      'Glob': 'glob'
-    };
-
-    const type = typeMap[toolName];
-    if (!type) return undefined;
-
-    const fileOp: any = { type };
-
-    const filePath = toolUseResult?.filePath || toolUseResult?.file?.filePath || input?.file_path || input?.path;
-
-    if (filePath) {
-      fileOp.path = filePath;
-      fileOp.format = extractFormat(filePath);
-      fileOp.language = detectLanguage(filePath);
-    } else if (input?.pattern) {
-      fileOp.pattern = input.pattern;
-    }
-
-    if (toolName === 'Write') {
-      const content = toolUseResult?.content || toolUseResult?.file?.content || input?.content;
-      if (content) {
-        const lines = content.split('\n');
-        fileOp.linesAdded = lines.length;
-      }
-    } else if (toolName === 'Edit' && toolUseResult?.structuredPatch) {
-      let added = 0;
-      let removed = 0;
-
-      for (const patch of toolUseResult.structuredPatch) {
-        if (Array.isArray(patch.lines)) {
-          for (const line of patch.lines) {
-            if (typeof line === 'string') {
-              if (line.startsWith('+')) added++;
-              else if (line.startsWith('-')) removed++;
-            }
-          }
-        }
-      }
-
-      if (added > 0) fileOp.linesAdded = added;
-      if (removed > 0) fileOp.linesRemoved = removed;
-    }
-
-    return fileOp;
-  }
 }

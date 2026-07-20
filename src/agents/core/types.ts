@@ -2,6 +2,8 @@
  * Core types for the plugin-based agent architecture
  */
 
+import type { SessionAdapter } from './session/BaseSessionAdapter.js';
+
 /**
  * Post-install hint - simple text lines shown after installation
  * Used to show custom setup instructions (e.g., IDE configuration)
@@ -40,6 +42,47 @@ export interface FlagMapping {
  */
 export interface FlagMappings {
   [sourceFlag: string]: FlagMapping;
+}
+
+// ============================================================================
+// Reasoning / thinking effort
+// ============================================================================
+
+export type CanonicalReasoningEffort =
+  | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export type ReasoningEffortStrategy = 'cli-flag' | 'cli-config' | 'env';
+
+/**
+ * Declarative config for how an agent receives the reasoning effort level.
+ * Lives in AgentMetadata.reasoningEffort.
+ */
+export interface ReasoningEffortConfig {
+  strategy: ReasoningEffortStrategy;
+  /** Canonical levels this agent accepts (used for clamping). */
+  supportedLevels: CanonicalReasoningEffort[];
+  /**
+   * Optional level mapper. Identity default — clamping handles all current agents.
+   * Escape hatch for a future provider that renames levels.
+   */
+  mapLevel?: (level: CanonicalReasoningEffort) => string | null;
+  /**
+   * Where to place the injected flag/config relative to existing args.
+   * Applies to cli-flag and cli-config; ignored by env. Default: 'append'.
+   */
+  placement?: 'prepend' | 'append';
+  // cli-flag strategy (claude: --effort, opencode: --variant)
+  flag?: string;
+  // cli-config strategy (codex: --config model_reasoning_effort="<level>")
+  configFlag?: string;  // default '--config'
+  configKey?: string;   // e.g. 'model_reasoning_effort'
+  // env strategy (kimi: KIMI_MODEL_THINKING_*)
+  envVars?: Record<string, string>;  // '%s' replaced by the mapped level
+  /**
+   * Native flag/key names whose presence in pass-through args suppresses injection.
+   * Strategy-aware: exact-or-= match for cli-flag, substring for cli-config, N/A for env.
+   */
+  userOverrideFlags?: string[];
 }
 
 /**
@@ -242,6 +285,9 @@ export interface AgentMetadata {
   /** Declarative mapping for multiple CLI flags */
   flagMappings?: FlagMappings;
 
+  /** Declarative reasoning-effort injection config. Omit for agents that do not support effort control. */
+  reasoningEffort?: ReasoningEffortConfig;
+
   /**
    * Silent mode - skip welcome/goodbye messages in console
    * Used by ACP adapters where stdout is JSON-RPC protocol
@@ -266,10 +312,18 @@ export interface AgentMetadata {
   dataPaths?: {
     home: string;        // Main directory: '~/.gemini', '~/.claude'
     settings?: string;   // Settings file path (relative to home, agent-specific)
+    binary?: string;     // Optional native binary path relative to home: '.kimi-code/bin/kimi'
   };
 
   // === Analytics Support ===
   analyticsAdapter?: AgentAnalyticsAdapter;  // Optional analytics adapter
+
+  /**
+   * When true, a per-session analytics JSON report is written automatically on
+   * session exit (see BaseAgentAdapter finalization). Default off; enabled on the
+   * interactive agents. A `--no-analytics-report` CLI flag disables it per run.
+   */
+  sessionAnalyticsReport?: boolean;
 
   // === Metrics Configuration ===
   /**
@@ -291,6 +345,13 @@ export interface AgentMetadata {
    * Defines where to find agents/commands/skills/hooks/rules for this agent
    */
   extensionsConfig?: AgentExtensionsConfig;
+
+  // === Hook Configuration ===
+  /**
+   * Hook event name mapping for agents whose native hook names differ
+   * from the internal names used by the hook router.
+   */
+  hookConfig?: AgentHookConfig;
 }
 
 /**
@@ -523,6 +584,39 @@ export interface HookTransformer {
 }
 
 /**
+ * Internal hook event names recognized by the hook router.
+ * These are the canonical event names used by CodeMie CLI hook handlers.
+ */
+export type InternalHookEventName =
+  | 'SessionStart'
+  | 'SessionEnd'
+  | 'PermissionRequest'
+  | 'Stop'
+  | 'UserPromptSubmit'
+  | 'SubagentStop'
+  | 'PreCompact';
+
+/**
+ * Agent-specific hook configuration.
+ */
+export interface AgentHookConfig {
+  /**
+   * Maps agent-native hook event names to internal hook event names.
+   * Keys are event names emitted by the agent; values are names used by the hook router.
+   *
+   * Valid internal values: SessionStart, SessionEnd, PermissionRequest, Stop,
+   * UserPromptSubmit, SubagentStop, PreCompact.
+   *
+   * @example
+   * eventNameMapping: {
+   *   'session_start': 'SessionStart',
+   *   'session_end': 'SessionEnd'
+   * }
+   */
+  eventNameMapping?: Record<string, InternalHookEventName>;
+}
+
+/**
  * Base hook event structure - all hooks include these fields
  * This is the internal format used by CodeMie CLI hook handlers
  *
@@ -568,6 +662,19 @@ export interface AgentInstallationOptions extends BaseInstallationOptions {
   [key: string]: unknown;
 }
 
+export interface ResumeOwnershipInput {
+  resumeId: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}
+
+export interface ResumeOwnershipResult {
+  supported: boolean;
+  owned?: boolean;
+  fallbackResumeCommand?: string;
+  auditData?: Record<string, unknown>;
+}
+
 /**
  * Agent adapter interface - implemented by BaseAgentAdapter
  */
@@ -583,6 +690,25 @@ export interface AgentAdapter {
   getVersion(): Promise<string | null>;
   getMetricsConfig(): AgentMetricsConfig | undefined;
   readonly ownedSubcommands?: string[];
+
+  /**
+   * Resolve whether a native resume target belongs to a CodeMie-managed session.
+   * Agents that do not support ownership validation may omit this capability.
+   */
+  resolveResumeOwnership?(
+    input: ResumeOwnershipInput,
+  ): Promise<ResumeOwnershipResult>;
+
+  /**
+   * Detect a resume invocation expressed via the agent's native positional
+   * CLI syntax (e.g. Codex's `codex resume <id>`) rather than the CodeMie
+   * `--resume <id>` flag, and extract the resume id if present. Commander
+   * routes unrecognized positional tokens into the pass-through args array,
+   * so this lets AgentCLI apply the same ownership check to native
+   * invocations. Agents without a native positional resume form may omit
+   * this capability.
+   */
+  extractNativeResumeId?(args: string[]): string | undefined;
 
   /**
    * Additional installation steps that run regardless of agent installation status
@@ -618,6 +744,17 @@ export interface AgentAdapter {
    * @returns BaseExtensionInstaller instance or undefined
    */
   getExtensionInstaller?(): BaseExtensionInstaller | undefined;
+
+  /**
+   * Get the session adapter for this agent (optional)
+   * Returns the parser for the agent's native session logs, used by analytics cost
+   * enrichment and native-session discovery.
+   *
+   * Agents that persist session transcripts implement this; others may omit it.
+   *
+   * @returns SessionAdapter instance or undefined
+   */
+  getSessionAdapter?(): SessionAdapter;
 
   /**
    * Get MCP configuration summary for this agent

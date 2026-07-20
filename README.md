@@ -10,7 +10,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3%2B-blue.svg)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-> **Unified AI Coding Assistant CLI** - Manage Claude Code, Google Gemini, OpenCode, and custom AI agents from one powerful command-line interface. Multi-provider support (OpenAI, Azure OpenAI, AWS Bedrock, LiteLLM, Ollama, Enterprise SSO, JWT Bearer Auth). Built-in LangGraph agent with file operations, command execution, and planning tools. Cross-platform support for Windows, Linux, and macOS.
+> **Unified AI Coding Assistant CLI** - Manage Claude Code, OpenAI Codex, Google Gemini, OpenCode, and custom AI agents from one powerful command-line interface. Multi-provider support (OpenAI, Azure OpenAI, AWS Bedrock, LiteLLM, Ollama, Enterprise SSO, JWT Bearer Auth). Built-in LangGraph agent with file operations, command execution, and planning tools. Cross-platform support for Windows, Linux, and macOS.
 
 ---
 
@@ -22,7 +22,7 @@
 
 CodeMie CLI is the all-in-one AI coding assistant for developers.
 
-- ✨ **One CLI, Multiple AI Agents** - Switch between Claude Code, Gemini, OpenCode, and built-in agent.
+- ✨ **One CLI, Multiple AI Agents** - Switch between Claude Code, OpenAI Codex, Gemini, OpenCode, and built-in agent.
 - 🔄 **Multi-Provider Support** - OpenAI, Azure OpenAI, AWS Bedrock, LiteLLM, Ollama, Enterprise SSO, and JWT Bearer Auth.
 - 🚀 **Built-in Agent** - A powerful LangGraph-based assistant with file operations, command execution, and planning tools.
 - 🖥️ **Cross-Platform** - Full support for Windows, Linux, and macOS with platform-specific optimizations.
@@ -45,8 +45,9 @@ Install CodeMie using the instructions for your shell, then run:
 codemie setup
 codemie doctor
 codemie install claude --supported
+codemie install codex --supported
 codemie-claude "Review my API code"
-codemie-code "Analyze this codebase"
+codemie-codex "Refactor this service"
 codemie --task "Generate unit tests"
 codemie skills find pdf                    # discover agent skills (EPAM internal + skills.sh)
 claude mcp add my-server -- codemie-mcp-proxy "https://mcp-server.example.com/sse"
@@ -65,7 +66,12 @@ npx @codemieai/code install claude --supported
 
 ### Native Bootstrap Installers
 
-For Windows and macOS, use the CodeMie bootstrap installers instead of installing directly with npm. The bootstrap installers are plain scripts stored in this public GitHub repo, so they do not require a Windows-built `.exe` or a private Artifactory mirror.
+For Windows and macOS, CodeMie ships two installer options:
+
+- **GUI installers** — a signed `.dmg` (macOS) and a `.exe` wizard (Windows) that guide you through installation with no terminal required. Download [CodeMie Connect 2.0.1 (macOS aarch64)](https://github.com/codemie-ai/codemie-code/raw/main/install/macos/CodeMie%20Connect_2.0.1_aarch64_signed.dmg) or browse the [macOS install folder](https://github.com/codemie-ai/codemie-code/tree/main/install/macos) / [Windows install folder](https://github.com/codemie-ai/codemie-code/tree/main/install/windows) and run the file.
+- **Script installers** — plain shell/PowerShell scripts stored in this repo that install via npm. Prefer these for CI, headless machines, or when the GUI installer is unavailable.
+
+The script installers are plain scripts stored in this public GitHub repo, so they do not require a Windows-built `.exe` or a private Artifactory mirror.
 
 The bootstrap path is recommended for non-technical users and managed enterprise machines because it:
 
@@ -143,7 +149,7 @@ npm install @codemieai/code
 npx @codemieai/code --help
 ```
 
-**Note:** Agent shortcuts (`codemie-claude`, `codemie-code`, `codemie-opencode`, etc.) require global installation.
+**Note:** Agent shortcuts (`codemie-claude`, `codemie-codex`, `codemie-code`, `codemie-opencode`, etc.) require global installation.
 
 ### Installation Troubleshooting
 
@@ -196,10 +202,11 @@ codemie-code "Help me refactor this component"
 
 ### External Agents
 
-You can also install and use external agents like Claude Code and Gemini.
+You can also install and use external agents like Claude Code, OpenAI Codex, Gemini, and OpenCode.
 
 **Available Agents:**
 - **Claude Code** (`codemie-claude`) - Anthropic's official CLI with advanced code understanding
+- **OpenAI Codex** (`codemie-codex`) - OpenAI's coding agent CLI with CodeMie-managed model/provider configuration
 - **Claude Code ACP** (`codemie-claude-acp`) - Claude Code for IDE integration via ACP protocol (Zed, JetBrains, Emacs)
 - **Gemini CLI** (`codemie-gemini`) - Google's Gemini for coding tasks
 - **OpenCode** (`codemie-opencode`) - Open-source AI coding assistant with session analytics
@@ -210,6 +217,10 @@ codemie install claude --supported
 
 # Use the agent
 codemie-claude "Review my API code"
+
+# Install Codex
+codemie install codex --supported
+codemie-codex "Refactor this authentication flow"
 
 # Install Gemini
 codemie install gemini
@@ -258,17 +269,22 @@ codemie install claude-acp
 
 **Version Management:**
 
-CodeMie manages agent versions to ensure compatibility. For Claude Code:
+CodeMie manages agent versions to ensure compatibility. For example, with Claude Code or OpenAI Codex:
 
 ```bash
 # Install latest supported version (recommended)
 codemie install claude --supported
 
+# Install latest supported Codex version (recommended)
+codemie install codex --supported
+
 # Install specific version
 codemie install claude 2.1.22
+codemie install codex 0.129.0
 
 # Install latest available version
 codemie install claude
+codemie install codex
 ```
 
 Auto-updates are automatically disabled to maintain version control. CodeMie notifies you when running a different version than supported.
@@ -395,6 +411,26 @@ codemie opencode-metrics --discover --verbose
 
 Metrics are automatically extracted at session end and synced to the analytics system. Use `codemie analytics` to view comprehensive usage statistics across all agents.
 
+## Claude Code Statusline
+
+The CodeMie Statusline displays live budget usage, project name, git branch, model, context window percentage, and token counts at the bottom of every Claude Code session.
+
+```bash
+# Install (or update) the statusline
+codemie install statusline
+
+# Remove it
+codemie uninstall statusline
+```
+
+Once installed, the statusline appears automatically in every claude session:
+
+```
+[my-project] $4.21/$50 (8%) | (main) | [claude-sonnet-4-5] | ctx:12% in:45.2k out:3.1k
+```
+
+The script is deployed to `~/.claude/codemie-budget-status.js` and registered as a `statusLine` command in `~/.claude/settings.json`. Budget values are cached for 60 seconds to avoid redundant API calls.
+
 ## Commands
 
 The CodeMie CLI has a rich set of commands for managing agents, configuration, and more.
@@ -402,17 +438,32 @@ The CodeMie CLI has a rich set of commands for managing agents, configuration, a
 ```bash
 codemie setup            # Interactive configuration wizard
 codemie list             # List all available agents
-codemie install <agent>  # Install an agent
+codemie install <name>   # Install an agent or add-on (e.g. statusline)
 codemie update <agent>   # Update installed agents
 codemie self-update      # Update CodeMie CLI itself
 codemie profile          # Manage provider profiles
 codemie analytics        # View usage analytics (sessions, tokens, costs, tools)
+codemie analytics --report --open   # Self-contained HTML dashboard (7 views, cost, date range, light/dark, no server)
+codemie analytics --report --report-format json  # Same priced report data as JSON (--report-format html | json | both)
 codemie workflow <cmd>   # Manage CI/CD workflows
 codemie doctor           # Health check and diagnostics
 codemie mcp-proxy <url>  # Stdio-to-HTTP MCP proxy with OAuth
+codemie codebase ui      # Start and open Codebase Memory graph UI
 ```
 
 For a full command reference, see the [Commands Documentation](docs/COMMANDS.md).
+
+## Codebase Memory MCP
+
+CodeMie can install and orchestrate `codebase-memory-mcp` with its graph visualization UI:
+
+```bash
+codemie install codebase-memory
+codemie-code init codebase-memory
+codemie codebase ui
+```
+
+Use `codemie codebase start|stop|status` to manage the UI process, or `codemie codebase open` to open the URL only.
 
 ## Connect Claude Desktop via CodeMie Proxy
 
@@ -460,6 +511,7 @@ Comprehensive guides are available in the `docs/` directory:
 - **[Configuration](docs/CONFIGURATION.md)** - Setup wizard, environment variables, multi-provider profiles, manual configuration
   - `CODEMIE_INSECURE=1` — disable SSL verification for self-signed certs or local dev environments (SSL is on by default)
 - **[Commands](docs/COMMANDS.md)** - Complete command reference including analytics and workflow commands
+- **[Analytics Report](docs/ANALYTICS-REPORT.md)** - HTML dashboard: all 8 views, filters, session drill-down, cost and efficiency metrics
 - **[Agents](docs/AGENTS.md)** - Detailed information about each agent (Claude Code, Gemini, built-in)
 - **[Authentication](docs/AUTHENTICATION.md)** - SSO setup, token management, enterprise authentication
 - **[Examples](docs/EXAMPLES.md)** - Common workflows, multi-provider examples, CI/CD integration

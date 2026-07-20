@@ -11,7 +11,7 @@ codemie setup                    # Interactive configuration wizard
 codemie setup skills             # Manage CodeMie platform skills (register/unregister)
 codemie setup assistants         # Manage CodeMie assistants as Claude subagents or skills
 codemie profile <command>        # Manage provider profiles
-codemie analytics [options]      # View usage analytics
+codemie analytics [options]      # View usage analytics (add --report for an HTML dashboard)
 codemie log [options]            # View and manage debug logs and sessions
 codemie workflow <command>       # Manage CI/CD workflows
 codemie list [options]           # List all available agents
@@ -22,7 +22,41 @@ codemie self-update              # Update CodeMie CLI itself
 codemie doctor [options]         # Health check and diagnostics
 codemie plugin <command>         # Manage native plugins
 codemie mcp-proxy <url>          # Stdio-to-HTTP MCP proxy with OAuth support
+codemie codebase <command>       # Manage Codebase Memory graph UI
 codemie version                  # Show version information
+```
+
+## Codebase Memory Commands
+
+```bash
+codemie install codebase-memory          # Install codebase-memory-mcp with graph UI
+codemie-<agent> init codebase-memory     # Configure agents, auto-index, and index this repo
+
+codemie codebase start                   # Start the graph UI in the background
+codemie codebase stop                    # Stop the graph UI
+codemie codebase status                  # Show graph UI status
+codemie codebase ui                      # Start if needed and open the graph UI
+codemie codebase open                    # Open the graph UI URL only
+```
+
+`codemie-<agent> init codebase-memory` runs the upstream MCP installer configuration, enables automatic indexing, and indexes the current repository. The graph UI defaults to `http://localhost:9749`.
+
+## Framework Init Commands
+
+```bash
+codemie-<agent> init --list              # List frameworks available for the agent
+codemie-claude init bmad                 # Install BMAD with the SDLC preset (BMM + TEA)
+codemie-claude init bmad --preset minimal # Install BMAD Method only (BMM)
+codemie-claude init bmad --interactive   # Use the upstream BMAD interactive installer
+codemie-claude init bmad --force         # Update an existing BMAD install
+```
+
+BMAD defaults to a non-interactive SDLC install using `_bmad-output` for artifacts. Advanced BMAD options are available when needed:
+
+```bash
+codemie-claude init bmad --bmad-channel next
+codemie-claude init bmad --bmad-modules bmm,tea --bmad-tools claude-code
+codemie-claude init bmad --bmad-set bmm.user_skill_level=expert bmm.project_knowledge=research
 ```
 
 ## Proxy Commands
@@ -123,6 +157,8 @@ All agent shortcuts support these options:
 --timeout <seconds>      # Override timeout (in seconds)
 -s, --silent             # Enable silent mode
 --task <prompt>          # Run a single task in headless (non-interactive) mode and exit
+--reasoning-effort <level> # Reasoning/thinking effort: minimal|low|medium|high|xhigh|max (see below)
+--resume <session-id>    # Resume a previous agent session by id (see below)
 --jwt-token <token>      # JWT token for authentication (overrides config and CODEMIE_JWT_TOKEN)
 ```
 
@@ -178,6 +214,17 @@ codemie-claude --task "Implement task 1" --silent --dangerously-skip-permissions
 
 The `--task` flag runs a single prompt non-interactively: the agent executes the task, prints the result, and exits. No user interaction is required. This is the primary way to use CodeMie agents in CI/CD pipelines and automated scripts.
 
+Two further options tune a headless run and work the same way across agents:
+
+- `--reasoning-effort <level>` — how much the model "thinks" before answering (see **Reasoning Effort** below).
+- `--resume <session-id>` — continue a previous session instead of starting fresh (see **Resuming a Session** below).
+
+The full headless signature is:
+
+```bash
+codemie-<agent> --model <model> --reasoning-effort <effort> [--resume <session-id>] --task "task prompt here"
+```
+
 ### How It Works
 
 Each agent maps `--task` to its own non-interactive mechanism:
@@ -185,6 +232,7 @@ Each agent maps `--task` to its own non-interactive mechanism:
 | Agent | Underlying flag/command | Behaviour |
 |-------|------------------------|-----------|
 | `codemie-claude` | `-p <prompt>` (print mode) | Runs prompt, prints output, exits |
+| `codemie-codex` | `codex exec <prompt>` | Runs task via `exec` subcommand, exits |
 | `codemie-gemini` | `-p <prompt>` | Runs prompt, prints output, exits |
 | `codemie-opencode` | `opencode run <prompt>` | Runs task via `run` subcommand, exits |
 
@@ -207,6 +255,64 @@ codemie-opencode --task "Review the code in src/ for security issues"
 codemie-claude --profile work --task "Fix the failing tests"
 codemie-gemini --model gemini-2.5-flash --task "Generate a changelog for this release"
 ```
+
+### Reasoning Effort (`--reasoning-effort`)
+
+`--reasoning-effort <level>` controls how much reasoning/thinking budget the model spends on the task. CodeMie accepts one canonical vocabulary and translates it to each agent's native mechanism:
+
+```text
+minimal  <  low  <  medium  <  high  <  xhigh  <  max
+```
+
+A level outside an agent's supported range is **clamped to the nearest supported level** (and noted on stderr). Agents that have no reasoning control emit a warning on stderr and run the task without it.
+
+| Agent | Native mechanism | Supported levels | Out-of-range handling |
+|-------|------------------|------------------|-----------------------|
+| `codemie-claude` | `--effort <level>` | low, medium, high, xhigh, max | `minimal` → `low` |
+| `codemie-codex` | `--config model_reasoning_effort=<level>` | minimal, low, medium, high, xhigh | `max` → `xhigh` |
+| `codemie-opencode` | `--variant <level>` | minimal … max (provider-specific) | passed through |
+| `codemie-gemini` | — (not supported) | — | flag ignored, warns on stderr |
+
+```bash
+# Low effort for a quick lookup
+codemie-claude --reasoning-effort low --task "List the exported functions in src/index.ts"
+
+# Highest effort for a hard problem (codex caps at xhigh → clamped, noted on stderr)
+codemie-codex --reasoning-effort max --task "Diagnose the race condition in session sync"
+
+# Combine with a model override
+codemie-opencode --model claude-sonnet-4-6 --reasoning-effort high --task "Refactor the auth module"
+```
+
+If you pass an agent's native flag yourself (e.g. Claude's `--effort`), CodeMie leaves it untouched and does not inject `--reasoning-effort`.
+
+### Resuming a Session (`--resume`)
+
+`--resume <session-id>` continues a previous agent session instead of starting a new one, preserving the earlier conversation context. Combine it with `--task` to send the next instruction headlessly:
+
+```bash
+codemie-<agent> --resume <session-id> --task "Now add tests for the change you just made"
+```
+
+Each agent maps `--resume` to its native resume mechanism (headless forms shown):
+
+| Agent | `--resume <id> --task <prompt>` runs |
+|-------|--------------------------------------|
+| `codemie-claude` | `claude -r <id> -p <prompt>` |
+| `codemie-codex` | `codex exec resume <id> <prompt>` |
+| `codemie-opencode` | `opencode run <prompt> -s <id>` |
+
+Omit `--task` to resume in interactive mode instead.
+
+**Finding a session id:**
+
+| Agent | Where to find it |
+|-------|------------------|
+| `codemie-claude` | the session filename in `~/.claude/projects/<project>/<id>.jsonl` |
+| `codemie-codex` | the `<id>` in the rollout filename under `~/.codex/codemie/home/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl` |
+| `codemie-opencode` | the `id` field from `opencode session list --format json` (e.g. `ses_…`) |
+
+An unknown or expired session id is passed straight through to the underlying CLI, which reports the error and exits with a non-zero status.
 
 ### Capturing Output
 
@@ -333,10 +439,71 @@ codemie analytics --last 7d                     # Last 7 days
 codemie analytics --verbose                     # Detailed session breakdown
 codemie analytics --export json                 # Export to JSON
 codemie analytics --export csv -o report.csv    # Export to CSV
+codemie analytics --no-scan-native              # Only CodeMie-tracked sessions (skip native logs)
+
+# HTML dashboard (self-contained, no server)
+codemie analytics --report                      # Write codemie-analytics-YYYY-MM-DD.html
+codemie analytics --report --open               # Write and open in the default browser
+codemie analytics --last 30d --report-output ./team.html   # Custom path (implies --report)
+codemie analytics --report --report-format json # Write the dashboard data as codemie-analytics-YYYY-MM-DD.report.json
+codemie analytics --report --report-format both # Write both .html and .report.json (shared stem)
 
 # View specific session
 codemie analytics --session abc-123-def         # Single session details
 ```
+
+### HTML Dashboard (`--report`)
+
+`--report` generates a single self-contained HTML file styled with the CodeMie design
+system — open it anywhere, **fully offline** (the design-system CSS, the client app, and
+the Chart.js library are all inlined; no server and no CDN required). It composes with
+every filter (`--project`, `--agent`, `--last`, etc.) and with `--export`.
+
+**Structured export (`--report-format`).** The report can be serialized as `html`
+(default), `json`, or `both`. `--report-format json` writes the exact cost-enriched
+dataset the dashboard renders — flat per-session records plus the meta totals,
+per-agent coverage, and per-model cost — as a `.json` file you can pipe into other
+tools. With `both` and a `--report-output foo.html`, the JSON is written alongside as
+`foo.json` (a shared stem is derived, so `--report-output foo`, `foo.html`, or `foo.json`
+all yield `foo.html` + `foo.json`). This is distinct from `--export json`, which writes
+the raw, **cost-less** project→branch→session analytics tree; use `--report-format json`
+when you want the priced report data. Their default filenames differ on purpose — the
+report writes `codemie-analytics-<date>.report.json` while `--export json` writes
+`codemie-analytics-<date>.json` — so running both in one command never overwrites either.
+
+The dashboard has seven client-side views with instant in-browser filtering:
+**Overview, Agents · Compare, Projects, Tools & Models, Activity** (weekday × hour
+heatmap), **Cost,** and **Sessions**. Filters: a range segment (**Today / 7d / 30d /
+90d / All**), a **custom from–to date range** (applies on change and overrides the
+preset), per-agent toggles, and a project selector. A **light/dark theme switch** sits
+in the bottom-left and persists your choice (defaults to dark).
+
+**Cost estimation** is computed at report time: for each session the native agent log
+(Claude, Claude Desktop, Gemini, …) is re-parsed for token usage and priced against
+`src/cli/commands/analytics/cost/pricing.json`. Claude Desktop (the native Anthropic
+subscription app, local-agent mode) is included — its `audit.jsonl` carries an
+authoritative per-model usage rollup that is matched against the pricing table. The
+Cost view shows a **Coverage by agent** table (sessions priced / native-log found per
+tool), so unpriced tools are explicit. Sessions whose native log is absent, or whose
+agent has no usage reader yet (codex/opencode degrade gracefully), are shown as
+"priced N of M" and never silently counted as `$0`.
+
+**Native session discovery (on by default).** `codemie analytics` (terminal and `--report`)
+scans native agent logs (`~/.claude/projects/**`) directly, so sessions from the plain
+`claude` command — your Anthropic subscription, not `codemie-claude` — are included even
+though CodeMie never tracked them. Logs already correlated to a tracked session are deduped
+by path. Pass `--no-scan-native` to use only CodeMie-tracked sessions.
+
+**De-duplicated cost.** Claude Code replays prior turns into resumed/forked/compacted session
+files, so the same API response appears in multiple logs. Cost de-duplicates by
+`(message.id, requestId)` across all sessions (the earliest session owns a shared response),
+counting each response once — without this the figure inflates ~2–3×. On a subscription you
+don't pay per token, so the figure is labeled **"Est. cost (API-equivalent)"** — the metered
+API value of your usage, not dollars billed.
+
+> **Refreshing prices:** `cost/pricing.json` is a vendored table (`{ "<model>":
+> { input, output, cacheRead, cacheWrite } }`, USD per 1M tokens). When new models ship,
+> add or update entries there — unpriced models are surfaced in the Cost view's banner.
 
 **Analytics Features:**
 - Hierarchical aggregation: Root → Projects → Branches → Sessions

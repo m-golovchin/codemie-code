@@ -3,17 +3,18 @@
  * Uses core MetricDelta type from src/metrics/types.ts
  */
 
-import { readFileSync, readdirSync } from 'fs';
+import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import type { MetricDelta } from '../../../agents/core/metrics/types.js';
 import type { AnalyticsFilter } from './types.js';
 import { getCodemiePath } from '../../../utils/paths.js';
+import { agentMatchesAnalyticsFilter } from './cost/codex-agent.js';
 
 /**
  * Session start event (special record type)
  * Not part of MetricDelta, but stored in same JSONL file
  */
-interface SessionStartEvent {
+export interface SessionStartEvent {
   recordId: string;
   type: 'session_start';
   timestamp: number;
@@ -30,7 +31,7 @@ interface SessionStartEvent {
 /**
  * Session end event (special record type)
  */
-interface SessionEndEvent {
+export interface SessionEndEvent {
   recordId: string;
   type: 'session_end';
   timestamp: number;
@@ -107,6 +108,15 @@ export interface RawSessionData {
   startEvent?: SessionStartEvent;
   endEvent?: SessionEndEvent;
   deltas: MetricDelta[];
+  /**
+   * Native agent log path used for cost pricing. Resolved either from a
+   * native-discovered session (which carries its log path directly) or from a
+   * CodeMie-tracked session's `correlation.agentSessionFile`. When present, the
+   * cost enricher prices from this path directly instead of re-reading the
+   * ~/.codemie/sessions correlation file (which its bare-UUID lookup misses for
+   * `completed_`-prefixed metadata).
+   */
+  agentSessionFile?: string;
 }
 
 /**
@@ -130,15 +140,28 @@ export class MetricsDataLoader {
 
       // Find all .json files (session metadata)
       const sessionFiles = files.filter(f => f.endsWith('.json') && !f.includes('_metrics'));
+      const seenSessionIds = new Set<string>();
 
       for (const sessionFile of sessionFiles) {
-        // Extract session ID from filename
-        const sessionId = sessionFile.replace('.json', '');
+        // Extract session ID from filename. `hook.ts` renames `<id>.json` to
+        // `completed_<id>.json` on SessionEnd — strip that prefix so filtering
+        // and the returned sessionId always use the bare UUID (matches the
+        // fallback pattern in src/cli/commands/log/reader.ts).
+        const sessionId = sessionFile.replace('.json', '').replace(/^completed_/, '');
 
         // Skip if filtering by session ID
         if (filter?.sessionId && sessionId !== filter.sessionId) {
           continue;
         }
+
+        // Guard against a stale/active filename pair for the same id (e.g. an
+        // interrupted, non-atomic hook.ts rename leaving both on disk at once) —
+        // resolveSessionPath() would resolve both filenames to the same file, so
+        // without this the session would be loaded and counted twice.
+        if (seenSessionIds.has(sessionId)) {
+          continue;
+        }
+        seenSessionIds.add(sessionId);
 
         // Load session records
         const sessionData = this.loadSession(sessionId);
@@ -165,8 +188,8 @@ export class MetricsDataLoader {
    * Load a single session's records
    */
   private loadSession(sessionId: string): RawSessionData | null {
-    const sessionFile = join(this.sessionsDir, `${sessionId}.json`);
-    const metricsFile = join(this.sessionsDir, `${sessionId}_metrics.jsonl`);
+    const sessionFile = this.resolveSessionPath(sessionId, '.json');
+    const metricsFile = this.resolveSessionPath(sessionId, '_metrics.jsonl');
 
     try {
       // Read session metadata
@@ -231,10 +254,30 @@ export class MetricsDataLoader {
         // Metrics file doesn't exist or can't be read - that's okay, session might have no metrics yet
       }
 
-      return { sessionId, startEvent, endEvent, deltas };
+      return { sessionId, startEvent, endEvent, deltas, agentSessionFile: sessionMetadata.correlation?.agentSessionFile };
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Resolve a session-scoped file path from the bare sessionId: prefer the active
+   * filename, fall back to the `completed_` prefix hook.ts renames it to on SessionEnd.
+   */
+  private resolveSessionPath(sessionId: string, suffix: string): string {
+    const active = join(this.sessionsDir, `${sessionId}${suffix}`);
+    if (existsSync(active)) {
+      return active;
+    }
+    return join(this.sessionsDir, `completed_${sessionId}${suffix}`);
+  }
+
+  /**
+   * Public filter check — apply the same criteria to externally-sourced sessions
+   * (e.g. native-discovered ones) so all surfaces filter consistently.
+   */
+  public sessionMatchesFilter(sessionData: RawSessionData, filter?: AnalyticsFilter): boolean {
+    return this.matchesFilter(sessionData, filter);
   }
 
   /**
@@ -245,13 +288,18 @@ export class MetricsDataLoader {
       return true;
     }
 
+    // Filter by session ID
+    if (filter.sessionId && sessionData.sessionId !== filter.sessionId) {
+      return false;
+    }
+
     const startEvent = sessionData.startEvent;
     if (!startEvent) {
       return false;
     }
 
     // Filter by agent name
-    if (filter.agentName && startEvent.agentName !== filter.agentName) {
+    if (filter.agentName && !agentMatchesAnalyticsFilter(startEvent.agentName, filter.agentName)) {
       return false;
     }
 

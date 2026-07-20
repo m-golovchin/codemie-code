@@ -11,6 +11,7 @@ import os from 'node:os';
 import dedent from 'dedent';
 import type { Assistant } from 'codemie-sdk';
 import { logger } from '@/utils/logger.js';
+import { StorageScope } from '@/env/types.js';
 
 /**
  * Create Claude subagent metadata for frontmatter
@@ -48,9 +49,12 @@ export function createClaudeSubagentContent(assistant: Assistant): string {
 
     ## Instructions
 
-    1. Extract the user's message from the conversation context
-    2. Execute the command with the message
-    3. Return the response
+    1. **Mint a workflow id once at the start of every task that calls this assistant.** Reuse it for every invocation in that task. Suggested patterns:
+       - From a shell: \`workflow_id="${assistant.slug}-$(date +%Y%m%d-%H%M%S)-$$"\`
+       - From an LLM caller: include the related ticket key (e.g. \`${assistant.slug}-EPMCDME-12345\`) or a fresh UUID.
+    2. **Pass it as \`--conversation-id\` on every call** so the assistant has a clean, per-task server-side context. Do not rely on the implicit \`CODEMIE_SESSION_ID\` env-var fallback — that id is shared across every assistant invocation in your Claude session and causes cross-topic context bleed.
+    3. **For state-changing operations (create / update / delete) put the full final payload in one message.** Do not split the work into a "draft" turn followed by a "confirm and apply" turn — if server-side context is lost between turns, the confirmation message itself can be persisted as the resource content.
+    4. **After any write, re-fetch the resource and verify the written content matches what you sent.** If it does not match, the call was lost — resend in single-shot form with the full payload.
 
     **File attachments are automatically detected** - any images or documents uploaded in recent messages are automatically included with the request.
 
@@ -58,26 +62,25 @@ export function createClaudeSubagentContent(assistant: Assistant): string {
 
     **Command format:**
     \`\`\`bash
-    codemie assistants chat "${assistant.id}" "message"
+    codemie assistants chat "${assistant.id}" --conversation-id "<workflow-id>" "message"
     \`\`\`
 
     ## Examples
 
     **Simple message:**
     \`\`\`bash
-    codemie assistants chat "${assistant.id}" "Help me with this task"
+    workflow_id="${assistant.slug}-$(date +%Y%m%d-%H%M%S)-$$"
+    codemie assistants chat "${assistant.id}" --conversation-id "$workflow_id" "Help me with this task"
     \`\`\`
 
-    **ARGUMENTS**: "check this code" --file /path/to/your/script.py
-
-    **With file attachment:**
+    **With file attachment** (reuse the same workflow id):
     \`\`\`bash
-    codemie assistants chat "${assistant.id}" "Analyze this code" --file "script.py"
+    codemie assistants chat "${assistant.id}" --conversation-id "$workflow_id" "Analyze this code" --file "script.py"
     \`\`\`
 
-    **With multiple files:**
+    **With multiple files** (reuse the same workflow id):
     \`\`\`bash
-    codemie assistants chat "${assistant.id}" "Review these files" --file "file1.png" --file "file2.py"
+    codemie assistants chat "${assistant.id}" --conversation-id "$workflow_id" "Review these files" --file "file1.png" --file "file2.py"
     \`\`\`
   `);
 }
@@ -85,8 +88,8 @@ export function createClaudeSubagentContent(assistant: Assistant): string {
 /**
  * Get subagent file path for a given slug
  */
-function getSubagentFilePath(slug: string, scope: 'global' | 'local' = 'global', workingDir?: string): string {
-  const agentsDir = scope === 'local' && workingDir
+function getSubagentFilePath(slug: string, scope: StorageScope = StorageScope.GLOBAL, workingDir?: string): string {
+  const agentsDir = scope === StorageScope.LOCAL && workingDir
     ? path.join(workingDir, '.claude', 'agents')
     : path.join(os.homedir(), '.claude', 'agents');
   return path.join(agentsDir, `${slug}.md`);
@@ -96,7 +99,7 @@ function getSubagentFilePath(slug: string, scope: 'global' | 'local' = 'global',
  * Register Claude subagent
  * Creates subagent file in ~/.claude/agents/ (global) or {cwd}/.claude/agents/ (local)
  */
-export async function registerClaudeSubagent(assistant: Assistant, scope: 'global' | 'local' = 'global', workingDir?: string): Promise<void> {
+export async function registerClaudeSubagent(assistant: Assistant, scope: StorageScope = StorageScope.GLOBAL, workingDir?: string): Promise<void> {
   const subagentPath = getSubagentFilePath(assistant.slug!, scope, workingDir);
   const claudeAgentsDir = path.dirname(subagentPath);
 
@@ -124,7 +127,7 @@ export async function registerClaudeSubagent(assistant: Assistant, scope: 'globa
  * Unregister Claude subagent
  * Removes subagent file from ~/.claude/agents/ (global) or {cwd}/.claude/agents/ (local)
  */
-export async function unregisterClaudeSubagent(slug: string, scope: 'global' | 'local' = 'global', workingDir?: string): Promise<void> {
+export async function unregisterClaudeSubagent(slug: string, scope: StorageScope = StorageScope.GLOBAL, workingDir?: string): Promise<void> {
   const subagentPath = getSubagentFilePath(slug, scope, workingDir);
 
   try {

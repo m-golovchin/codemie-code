@@ -2,9 +2,10 @@ import { Command } from 'commander';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import chalk from 'chalk';
-import { AgentAdapter } from './types.js';
+import type { AgentAdapter, ResumeOwnershipResult } from './types.js';
 import { ConfigLoader, CodeMieConfigOptions } from '../../utils/config.js';
 import { ensureApiBase, DEFAULT_CODEMIE_BASE_URL } from '../../providers/core/codemie-auth-helpers.js';
+import { AuthMethod, ProviderName } from '../../providers/core/types.js';
 import { JWTTemplate } from '../../providers/plugins/jwt/jwt.template.js';
 import { logger } from '../../utils/logger.js';
 import { getDirname } from '../../utils/paths.js';
@@ -15,6 +16,11 @@ import { GeminiPluginMetadata } from '../plugins/gemini/gemini.plugin.js';
 import { OpenCodePluginMetadata } from '../plugins/opencode/opencode.plugin.js';
 import {ClaudeAcpPluginMetadata} from "../plugins/claude/claude-acp.plugin.js";
 import { CodexPluginMetadata } from '../plugins/codex/codex.plugin.js';
+import { KimiPluginMetadata } from '../plugins/kimi/kimi.plugin.js';
+import { KimiAcpPluginMetadata } from '../plugins/kimi/kimi-acp.plugin.js';
+import { createAssistantsSetupCommand } from '../../cli/commands/assistants/setup/index.js';
+import { createSkillsSetupCommand } from '../../cli/commands/skills/setup/index.js';
+import type { TargetAgent } from '../../cli/commands/shared/agent-targets.js';
 
 /**
  * Universal CLI builder for any agent
@@ -70,6 +76,9 @@ export class AgentCLI {
       .option('--timeout <seconds>', 'Override timeout (in seconds)', parseInt)
       .option('--jwt-token <token>', 'JWT token for authentication (overrides config)')
       .option('--task <prompt>', 'Execute a single task (agent-specific flag mapping)')
+      .option('--reasoning-effort <level>', 'Reasoning/thinking effort: minimal|low|medium|high|xhigh|max')
+      .option('--resume <session-id>', 'Resume an existing session by ID')
+      .option('--no-analytics-report', 'Disable the automatic per-session analytics report written on exit')
       .allowUnknownOption()
       .argument('[args...]', `Arguments to pass to ${this.adapter.displayName}`)
       .action(async (args, options) => {
@@ -93,16 +102,31 @@ export class AgentCLI {
         await this.handleHealthCheck();
       });
 
+    if (this.isSetupCapableAgent(this.adapter.name)) {
+      const setupCommand = new Command('setup')
+        .description(`Setup ${this.adapter.displayName} integrations`);
+
+      setupCommand.addCommand(createAssistantsSetupCommand(this.adapter.name).name('assistants'));
+      setupCommand.addCommand(createSkillsSetupCommand(this.adapter.name).name('skills'));
+      this.program.addCommand(setupCommand);
+    }
+
     // Add init command for frameworks, but only when the agent binary doesn't
     // already own an 'init' subcommand (avoids shadowing the binary's native command).
     if (!this.adapter.ownedSubcommands?.includes('init')) {
       this.program
         .command('init')
         .description('Initialize development framework')
-        .argument('[framework]', 'Framework to initialize (speckit, bmad)')
+        .argument('[framework]', 'Framework to initialize (speckit, bmad, codebase-memory)')
         .option('-l, --list', 'List available frameworks')
         .option('--force', 'Force re-initialization')
         .option('--project-name <name>', 'Project name for framework initialization')
+        .option('--preset <preset>', 'Framework preset (for BMAD: sdlc, minimal, interactive)')
+        .option('--bmad-channel <channel>', 'BMAD installer channel (latest, next)')
+        .option('--bmad-modules <modules>', 'BMAD modules to install, comma-separated (for example: bmm,tea)')
+        .option('--bmad-tools <tools>', 'BMAD tool IDs to configure, comma-separated (for example: claude-code)')
+        .option('--bmad-set <key=value...>', 'BMAD module config override; repeat values after the flag')
+        .option('--interactive', 'Use the upstream interactive installer when the framework supports it')
         .action(async (framework, options) => {
           // Commander.js v11 behavior: options might be Command instance or plain object
           const opts = typeof options?.opts === 'function' ? options.opts() : options;
@@ -160,20 +184,21 @@ export class AgentCLI {
         model: options.model as string | undefined,
         apiKey: options.apiKey as string | undefined,
         baseUrl: options.baseUrl as string | undefined,
-        timeout: options.timeout as number | undefined
+        timeout: options.timeout as number | undefined,
+        reasoningEffort: options.reasoningEffort as import('./types.js').CanonicalReasoningEffort | undefined,
       });
 
       // JWT token from CLI overrides everything
       if (options.jwtToken) {
         process.env.CODEMIE_JWT_TOKEN = options.jwtToken as string;
-        process.env.CODEMIE_AUTH_METHOD = 'jwt';
+        process.env.CODEMIE_AUTH_METHOD = AuthMethod.JWT;
 
         const hasNoConfig = !options.provider
           && !(await ConfigLoader.hasGlobalConfig())
           && !(await ConfigLoader.hasLocalConfig(process.cwd()));
 
         if (hasNoConfig) {
-          config.provider = 'bearer-auth';
+          config.provider = ProviderName.BEARER_AUTH;
           if (!config.model) {
             config.model = JWTTemplate.recommendedModels?.[0];
           }
@@ -183,7 +208,26 @@ export class AgentCLI {
             ? ensureApiBase(config.codeMieUrl)
             : ensureApiBase(DEFAULT_CODEMIE_BASE_URL);
         }
-        config.authMethod = 'jwt';
+        config.authMethod = AuthMethod.JWT;
+      }
+
+      // Validate --reasoning-effort (catches both CLI flag and profile defaults)
+      if (config.reasoningEffort) {
+        const { normalizeReasoningEffort } = await import('./reasoning-effort.js');
+        const normalized = normalizeReasoningEffort(config.reasoningEffort);
+        if (!normalized) {
+          console.error(chalk.red(`\n✗ Invalid --reasoning-effort '${config.reasoningEffort}'`));
+          console.error(chalk.white('  Valid values: minimal, low, medium, high, xhigh, max\n'));
+          logger.error(`Invalid --reasoning-effort value '${config.reasoningEffort}'`);
+          process.exit(1);
+        }
+        config.reasoningEffort = normalized;
+      }
+
+      // Validate --resume (must have a non-empty value when specified)
+      if (options.resume !== undefined && !options.resume) {
+        console.error(chalk.red('\n✗ --resume requires a session id\n'));
+        process.exit(1);
       }
 
       // Validate essential configuration
@@ -198,7 +242,7 @@ export class AgentCLI {
 
       // Skip apiKey validation for SSO and JWT authentication methods
       const authMethod = config.authMethod;
-      const usesAlternativeAuth = authMethod === 'sso' || authMethod === 'jwt';
+      const usesAlternativeAuth = authMethod === AuthMethod.SSO || authMethod === AuthMethod.JWT;
 
       if (requiresAuth && !config.apiKey && !usesAlternativeAuth) {
         missingFields.push('apiKey');
@@ -247,7 +291,7 @@ export class AgentCLI {
       // which gets spread after process.env in BaseAgentAdapter.run(), erasing the
       // 'jwt' value we set in process.env above and causing the proxy to use the SSO path.
       if (options.jwtToken) {
-        providerEnv.CODEMIE_AUTH_METHOD = 'jwt';
+        providerEnv.CODEMIE_AUTH_METHOD = AuthMethod.JWT;
         providerEnv.CODEMIE_JWT_TOKEN = options.jwtToken as string;
       }
 
@@ -260,8 +304,86 @@ export class AgentCLI {
         providerEnv.CODEMIE_STATUS = '1';
       }
 
+      // Disable per-session analytics report on exit (default enabled).
+      // Commander sets options.analyticsReport = false only when --no-analytics-report is passed.
+      if (options.analyticsReport === false) {
+        providerEnv.CODEMIE_SESSION_ANALYTICS_REPORT = '0';
+      }
+
       // Serialize full profile config for proxy plugins (read once at CLI level)
       providerEnv.CODEMIE_PROFILE_CONFIG = JSON.stringify(config);
+
+      // Resume ownership check — after providerEnv is built so we can extend it
+      //
+      // options.resume only reflects the CodeMie `--resume <id>` flag. Some agents
+      // (e.g. Codex) also accept a native positional `resume <id>` invocation, which
+      // Commander's catch-all [args...] absorbs without populating options.resume.
+      // Ask the adapter to recognize its own native form so the ownership check still
+      // applies to it.
+      let nativeResumeId: string | undefined;
+      if (!options.resume) {
+        try {
+          nativeResumeId = this.adapter.extractNativeResumeId?.(args);
+        } catch (error) {
+          logger.debug('[AgentCLI] Native resume id extraction failed; proceeding without validation', {
+            agent: this.adapter.name,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (options.resume || nativeResumeId) {
+        // Strip only control characters before using the value in output.
+        // Native resume commands may accept non-UUID identifiers (slugs, ticket IDs, etc.),
+        // so we must not validate the format here.
+        const resumeId = ((options.resume as string | undefined) ?? nativeResumeId ?? '').replace(/\p{Cc}/gu, '');
+        const resolveResumeOwnership = this.adapter.resolveResumeOwnership?.bind(this.adapter);
+
+        if (resolveResumeOwnership && resumeId) {
+          let ownership: ResumeOwnershipResult | undefined;
+
+          try {
+            ownership = await resolveResumeOwnership({
+              resumeId,
+              cwd: process.cwd(),
+              env: process.env,
+            });
+          } catch (error) {
+            logger.debug('[AgentCLI] Resume ownership resolver failed; proceeding without validation', {
+              agent: this.adapter.name,
+              resumeId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+
+          const isExternal = ownership?.supported === true && ownership.owned === false;
+
+          if (isExternal) {
+            const confirmed = await this.promptExternalResume(
+              resumeId,
+              ownership?.fallbackResumeCommand,
+            );
+            const { appendAuditEvent } = await import('./session/session-origin-audit.js');
+            const auditData = {
+              agent: this.adapter.name,
+              resumeId,
+              ...(ownership?.auditData ?? {}),
+            };
+
+            if (!confirmed) {
+              appendAuditEvent('resume_blocked', auditData);
+              process.exit(1);
+            }
+
+            // Inject into subprocess env (for lifecycle hook subprocesses that inherit it)
+            // and into the current process env (for same-process consumers such as sso syncProcessor).
+            Object.assign(providerEnv, buildResumeEnvOverride(true));
+            process.env.CODEMIE_CONV_SYNC_DISABLED = '1';
+            appendAuditEvent('resume_external_confirmed', auditData);
+            logger.info(`[AgentCLI] External resume confirmed for agent ${this.adapter.name}; conversation sync suppressed`);
+          }
+        }
+      }
 
       // Set profile name in logger for log formatting
       logger.setProfileName(config.name || 'default');
@@ -274,6 +396,8 @@ export class AgentCLI {
 
       // Run the agent (welcome message will be shown inside)
       await this.adapter.run(agentArgs, providerEnv);
+      // Clean up the process-level flag set for same-process conversation sync consumers.
+      delete process.env.CODEMIE_CONV_SYNC_DISABLED;
     } catch (error) {
       // Show user-friendly error message in console first
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -382,7 +506,12 @@ export class AgentCLI {
       await frameworkAdapter.init(this.adapter.name, {
         force: options.force as boolean | undefined,
         projectName: options.projectName as string | undefined,
-        cwd: process.cwd()
+        cwd: process.cwd(),
+        preset: options.interactive ? 'interactive' : options.preset,
+        bmadChannel: options.bmadChannel,
+        bmadModules: options.bmadModules,
+        bmadTools: options.bmadTools,
+        bmadSet: options.bmadSet
       });
 
     } catch (error) {
@@ -405,7 +534,7 @@ export class AgentCLI {
   ): string[] {
     const agentArgs = [...args];
     // Config-only options (not passed to agent, handled by CodeMie CLI)
-    const configOnlyOptions = ['profile', 'provider', 'apiKey', 'baseUrl', 'timeout', 'model', 'silent', 'status', 'jwtToken'];
+    const configOnlyOptions = ['profile', 'provider', 'apiKey', 'baseUrl', 'timeout', 'model', 'silent', 'status', 'jwtToken', 'reasoningEffort', 'analyticsReport'];
 
     for (const [key, value] of Object.entries(options)) {
       // Skip config-only options (handled by CodeMie CLI layer)
@@ -438,8 +567,14 @@ export class AgentCLI {
       'opencode': OpenCodePluginMetadata,
       'claude-acp': ClaudeAcpPluginMetadata,
       'codex': CodexPluginMetadata,
+      'kimi': KimiPluginMetadata,
+      'kimi-acp': KimiAcpPluginMetadata,
     };
     return metadataMap[this.adapter.name];
+  }
+
+  private isSetupCapableAgent(agentName: string): agentName is TargetAgent {
+    return agentName === 'claude' || agentName === 'codex' || agentName === 'gemini';
   }
 
   /**
@@ -493,10 +628,58 @@ export class AgentCLI {
     return true;
   }
 
+  private async promptExternalResume(
+    sessionId: string,
+    fallbackResumeCommand?: string,
+  ): Promise<boolean> {
+    const fallbackLine = fallbackResumeCommand
+      ? `Use '${fallbackResumeCommand}' to resume without CodeMie tracking.\n`
+      : 'Resume without CodeMie tracking using the native agent CLI.\n';
+
+    if (shouldBlockNonInteractiveResume()) {
+      console.error(
+        chalk.red(`\n✗ Session ${sessionId} was not created through CodeMie.\n`) +
+        chalk.white('Non-interactive mode: resume blocked.\n') +
+        chalk.white(fallbackLine)
+      );
+      return false;
+    }
+
+    const { createInterface } = await import('node:readline');
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+    console.log(chalk.yellow(`\n⚠  Warning: Session ${sessionId} was not created through CodeMie.`));
+    console.log(chalk.white('If you continue:'));
+    console.log(chalk.white('  • Token usage and API metrics WILL be tracked via the CodeMie proxy.'));
+    console.log(chalk.white('  • Conversation transcript will NOT be synced to your CodeMie account history.\n'));
+    console.log(chalk.dim(
+      fallbackResumeCommand
+        ? `To resume without any CodeMie tracking, use: ${fallbackResumeCommand}\n`
+        : 'To resume without any CodeMie tracking, use the native agent CLI.\n'
+    ));
+
+    try {
+      const answer = await new Promise<string>((resolve) => {
+        rl.question(chalk.yellow('Continue with CodeMie? (y/N): '), resolve);
+      });
+      return answer.trim().toLowerCase() === 'y';
+    } finally {
+      rl.close();
+    }
+  }
+
   /**
    * Run the CLI
    */
   async run(argv: string[]): Promise<void> {
     await this.program.parseAsync(argv);
   }
+}
+
+export function buildResumeEnvOverride(isExternal: boolean): Record<string, string> {
+  return isExternal ? { CODEMIE_CONV_SYNC_DISABLED: '1' } : {};
+}
+
+export function shouldBlockNonInteractiveResume(): boolean {
+  return !process.stdin.isTTY || process.env.CODEMIE_NO_PROMPTS === '1';
 }

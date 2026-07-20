@@ -6,10 +6,11 @@
 
 import chalk from 'chalk';
 import type { Assistant } from 'codemie-sdk';
-import type { CodemieAssistant, ProviderProfile } from '@/env/types.js';
+import type { CodemieAssistant } from '@/env/types.js';
 import { MESSAGES } from '@/cli/commands/assistants/constants.js';
 import { REGISTRATION_MODE } from '@/cli/commands/assistants/setup/manualConfiguration/constants.js';
 import { COLOR } from '../constants.js';
+import { formatAgentInvocation, type TargetAgent } from '@/cli/commands/shared/agent-targets.js';
 
 /**
  * Display summary of changes
@@ -18,7 +19,7 @@ export function displaySummary(
   toRegister: Assistant[],
   toUnregister: CodemieAssistant[],
   profileName: string,
-  config: ProviderProfile,
+  assistants: CodemieAssistant[],
   configLocation?: string
 ): void {
   const totalChanges = toRegister.length + toUnregister.length;
@@ -28,14 +29,14 @@ export function displaySummary(
     console.log(chalk.dim(MESSAGES.SETUP.SUMMARY_CONFIG_LOCATION(configLocation)));
   }
 
-  displayCurrentlyRegistered(config);
+  displayCurrentlyRegistered(assistants);
 }
 
 /**
  * Display currently registered assistants
  */
-export function displayCurrentlyRegistered(config: ProviderProfile): void {
-  if (!config.codemieAssistants || config.codemieAssistants.length === 0) {
+export function displayCurrentlyRegistered(assistants: CodemieAssistant[]): void {
+  if (!assistants || assistants.length === 0) {
     return;
   }
 
@@ -47,16 +48,15 @@ export function displayCurrentlyRegistered(config: ProviderProfile): void {
   console.log(chalk.bold('Registered assistants:'));
   console.log('');
 
-  config.codemieAssistants.forEach((assistant: CodemieAssistant) => {
+  assistants.forEach((assistant: CodemieAssistant) => {
     const mode = assistant.registrationMode || REGISTRATION_MODE.AGENT;
 
-    // Build location info based on registration mode
-    let locationInfo = '';
-    if (mode === REGISTRATION_MODE.AGENT) {
-      locationInfo = chalk.dim(` (@${assistant.slug} in code or claude)`);
-    } else if (mode === REGISTRATION_MODE.SKILL) {
-      locationInfo = chalk.dim(` (/${assistant.slug} in claude or @${assistant.slug} in code)`);
-    }
+    const targets: TargetAgent[] = assistant.agentTargets?.length
+      ? assistant.agentTargets
+      : mode === REGISTRATION_MODE.AGENT
+        ? ['claude']
+        : ['claude'];
+    const locationInfo = chalk.dim(` (${formatInvocationList(assistant.slug, targets)})`);
 
     console.log(`  • ${purpleColor(assistant.slug)} - ${assistant.name}${locationInfo}`);
   });
@@ -64,4 +64,14 @@ export function displayCurrentlyRegistered(config: ProviderProfile): void {
   console.log('');
   console.log(purpleLine);
   console.log('');
+}
+
+function formatInvocationList(slug: string, targets: TargetAgent[]): string {
+  const invocations = targets.map(target => formatAgentInvocation(slug, target));
+
+  if (invocations.length === 1) {
+    return invocations[0];
+  }
+
+  return `${invocations.slice(0, -1).join(', ')} or ${invocations[invocations.length - 1]}`;
 }

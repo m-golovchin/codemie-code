@@ -25,8 +25,7 @@ export class ProxyError extends Error {
       type: this.name,
       code: this.code,
       message: this.message,
-      statusCode: this.statusCode,
-      ...this.details
+      statusCode: this.statusCode
     };
   }
 }
@@ -103,7 +102,7 @@ export function normalizeError(error: unknown, context?: Record<string, unknown>
 
     // Generic error
     return new ProxyError(
-      error.message,
+      'An internal server error occurred',
       500,
       'INTERNAL_ERROR',
       {
@@ -115,7 +114,7 @@ export function normalizeError(error: unknown, context?: Record<string, unknown>
 
   // Unknown error type
   return new ProxyError(
-    String(error),
+    'An unexpected error occurred',
     500,
     'UNKNOWN_ERROR',
     { originalError: String(error), ...context }

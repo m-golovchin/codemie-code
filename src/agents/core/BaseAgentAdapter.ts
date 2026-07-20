@@ -53,6 +53,34 @@ export abstract class BaseAgentAdapter implements AgentAdapter {
   }
 
   /**
+   * Writes a per-session analytics JSON report on session exit when the agent
+   * opts in (`metadata.sessionAnalyticsReport`) and the run did not disable it
+   * (`CODEMIE_SESSION_ANALYTICS_REPORT !== '0'`). Non-fatal: any failure is logged
+   * and swallowed so session finalization always completes.
+   */
+  private async maybeWriteSessionReport(env: NodeJS.ProcessEnv): Promise<void> {
+    if (!this.metadata.sessionAnalyticsReport) return;
+    if (env.CODEMIE_SESSION_ANALYTICS_REPORT === '0') return;
+    const sessionId = env.CODEMIE_SESSION_ID;
+    if (!sessionId) return;
+
+    try {
+      const { generateSessionReport } = await import('../../cli/commands/analytics/report/session-report.js');
+      const outputPath = join(process.cwd(), 'docs', 'codemie', 'analytics', `codemie-analytics-${sessionId}.json`);
+      const result = await generateSessionReport({ sessionId, outputPath });
+      if (result.written) {
+        logger.debug(`[${this.displayName}] Session analytics report written: ${result.written}`);
+      } else {
+        logger.debug(`[${this.displayName}] No analytics data for session ${sessionId}; report skipped`);
+      }
+    } catch (err) {
+      logger.warn(`[${this.displayName}] Session analytics report failed (non-fatal)`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
    * Get metrics configuration for this agent
    * Used by post-processor to filter/sanitize metrics
    */
@@ -481,6 +509,7 @@ export abstract class BaseAgentAdapter implements AgentAdapter {
       ...envOverrides,
       CODEMIE_SESSION_ID: sessionId,
       CODEMIE_AGENT: this.metadata.name,
+      CODEMIE_CLIENT_TYPE: this.metadata.ssoConfig?.clientType || 'codemie-cli',
       CODEMIE_REPOSITORY: sessionRepository,
       ...(sessionBranch && { CODEMIE_GIT_BRANCH: sessionBranch })
     };
@@ -548,6 +577,23 @@ export abstract class BaseAgentAdapter implements AgentAdapter {
       transformedArgs = transformFlags(enrichedArgs, this.metadata.flagMappings, this.extractConfig(env));
     } else {
       transformedArgs = enrichedArgs;
+    }
+
+    // Central reasoning-effort injection (Approach A).
+    // Runs after enrichArgs and transformFlags so args are in their final form.
+    if (this.metadata.reasoningEffort && env.CODEMIE_REASONING_EFFORT) {
+      const { applyReasoningEffort } = await import('./reasoning-effort.js');
+      transformedArgs = applyReasoningEffort(
+        transformedArgs,
+        env,
+        this.metadata.reasoningEffort,
+        env.CODEMIE_REASONING_EFFORT,
+        this.metadata.name,
+      ).args;
+    } else if (env.CODEMIE_REASONING_EFFORT) {
+      // Agent declared no reasoningEffort block — warn and continue (spec §6.4).
+      logger.warn(`[${this.metadata.name}] --reasoning-effort is set but not supported; ignoring`);
+      console.error(chalk.yellow(`⚠  --reasoning-effort is not supported for ${this.displayName}; ignoring.`));
     }
 
     // Log configuration (CODEMIE_* + transformed agent-specific vars)
@@ -664,21 +710,51 @@ export abstract class BaseAgentAdapter implements AgentAdapter {
       const { getCommandPath } = await import('../../utils/processes.js');
       const resolvedPath = await getCommandPath(this.metadata.cliCommand);
       if (resolvedPath) {
-        commandPath = isWindows && resolvedPath.includes(' ') ? `"${resolvedPath}"` : resolvedPath;
+        commandPath = isWindows && /[ \t,;=()&|<>^%[\]{}]/.test(resolvedPath) ? `"${resolvedPath}"` : resolvedPath;
         logger.debug(`Resolved command path: ${resolvedPath}`);
       } else if (!isWindows) {
         // On Unix, check common installation paths if command not found in PATH
         // Native installers (e.g., Claude, Gemini) place binaries in ~/.local/bin/
         const { resolveHomeDir } = await import('../../utils/paths.js');
+        const fs = await import('fs');
         const localBinPath = resolveHomeDir(`.local/bin/${this.metadata.cliCommand}`);
         try {
-          const fs = await import('fs');
           await fs.promises.access(localBinPath, fs.constants.X_OK);
           commandPath = localBinPath;
           logger.debug(`Found command at local bin path: ${localBinPath}`);
         } catch {
-          // Not found in ~/.local/bin either, use original command
+          const agentBinPath = this.metadata.dataPaths?.binary
+            ? resolveHomeDir(this.metadata.dataPaths.binary)
+            : undefined;
+
+          if (agentBinPath) {
+            try {
+              await fs.promises.access(agentBinPath, fs.constants.X_OK);
+              commandPath = agentBinPath;
+              logger.debug(`Found command at agent bin path: ${agentBinPath}`);
+            } catch (error) {
+              const code = error && typeof error === 'object' && 'code' in error
+                ? String((error as NodeJS.ErrnoException).code)
+                : undefined;
+
+              if (code === 'EACCES' || code === 'EPERM') {
+                throw new Error(`${this.displayName} binary is not executable: ${agentBinPath}`);
+              }
+
+              logger.debug(`Agent binary path not usable: ${agentBinPath}`, {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
         }
+      }
+
+      // getCommandPath() may return null (binary not in PATH), leaving commandPath as the raw
+      // unquoted absolute path from plugin metadata. CMD.EXE treats bare '(' as a group delimiter
+      // and tab , ; = as token delimiters, so a path like C:\Users\Name(Org\...\bin\cmd.exe or
+      // C:\Users\Name;Org\... must be quoted before shell: true spawn.
+      if (isWindows && /[ \t,;=()&|<>^%[\]{}]/.test(commandPath) && !commandPath.startsWith('"')) {
+        commandPath = `"${commandPath}"`;
       }
 
       // When shell: true is needed (Windows), merge args into command to avoid DEP0190
@@ -689,7 +765,7 @@ export abstract class BaseAgentAdapter implements AgentAdapter {
       if (isWindows && transformedArgs.length > 0) {
         // Quote arguments containing spaces or special characters
         const quotedArgs = transformedArgs.map(arg =>
-          arg.includes(' ') || arg.includes('"') ? `"${arg.replace(/"/g, '\\"')}"` : arg
+          /[ "()&|<>^%[\]{}]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg
         );
         finalCommand = `${commandPath} ${quotedArgs.join(' ')}`;
         finalArgs = [];
@@ -766,6 +842,9 @@ export abstract class BaseAgentAdapter implements AgentAdapter {
           if (code !== null) {
             await executeAfterRun(this, this.metadata.lifecycle, this.metadata.name, code, env);
           }
+
+          // Write the per-session analytics report (gated, non-fatal).
+          await this.maybeWriteSessionReport(env);
 
           // Show goodbye message with random easter egg (skip in silent mode for ACP)
           if (!this.metadata.silentMode) {
@@ -976,11 +1055,10 @@ export abstract class BaseAgentAdapter implements AgentAdapter {
       }
     }
 
-    // Transform API key (always set, even if empty)
-    if (envMapping.apiKey) {
-      const apiKeyValue = env.CODEMIE_API_KEY || '';
+    // Transform API key
+    if (env.CODEMIE_API_KEY && envMapping.apiKey) {
       for (const envVar of envMapping.apiKey) {
-        env[envVar] = apiKeyValue;
+        env[envVar] = env.CODEMIE_API_KEY;
       }
     }
 

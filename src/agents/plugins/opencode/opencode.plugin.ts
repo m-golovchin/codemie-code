@@ -20,6 +20,8 @@ export const OpenCodePluginMetadata: AgentMetadata = {
   description: 'OpenCode - open-source AI coding assistant',
   npmPackage: 'opencode-ai',  // Official npm package (npm i -g opencode-ai)
   cliCommand: process.env.CODEMIE_OPENCODE_BIN || 'opencode',
+
+  sessionAnalyticsReport: true,
   dataPaths: {
     home: '.opencode'
     // NOTE: Session storage is NOT in home - it's in XDG_DATA_HOME/opencode/storage/
@@ -33,6 +35,21 @@ export const OpenCodePluginMetadata: AgentMetadata = {
   },
   supportedProviders: ['litellm', 'ai-run-sso', 'ollama', 'bedrock', 'bearer-auth'],
   ssoConfig: { enabled: true, clientType: 'codemie-opencode' },
+
+  flagMappings: {
+    '--resume': {
+      type: 'flag',
+      target: '-s',
+    },
+  },
+
+  reasoningEffort: {
+    strategy: 'cli-flag',
+    flag: '--variant',
+    placement: 'append',
+    supportedLevels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    userOverrideFlags: ['--variant'],
+  },
 
   lifecycle: {
     // NOTE: beforeRun signature is (env, config) per AgentLifecycle interface

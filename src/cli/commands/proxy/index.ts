@@ -9,13 +9,17 @@ import {
 } from '../../../utils/errors.js';
 import { logger } from '../../../utils/logger.js';
 import { sanitizeLogArgs } from '../../../utils/security.js';
+import { syncRegisteredSkills } from '../skills/setup/sync.js';
+import { syncPluginSkills } from '../skills/setup/sync-plugin.js';
 import {
   checkStatus,
   readState,
   spawnDaemon,
   stopDaemon,
 } from './daemon-manager.js';
-import { writeDesktopConfig } from './connectors/desktop.js';
+import { writeDesktopConfig, getDesktopBaseDir, mapCanonicalToDesktop } from './connectors/desktop.js';
+import { fetchManagedMcpServers } from './connectors/managed-mcp-remote.js';
+import { checkProxyHealth } from './health-check.js';
 import { printDesktopInspection } from './inspect-desktop.js';
 
 const DEFAULT_DAEMON_PORT = 4001;
@@ -158,6 +162,12 @@ export function createProxyCommand(): Command {
 
       await verifySsoCredentials(config.baseUrl, config.name ?? 'default');
 
+      const cwd = process.cwd();
+      await Promise.allSettled([
+        syncRegisteredSkills(config.name ?? 'default', cwd),
+        syncPluginSkills(),
+      ]);
+
       console.log('Starting proxy daemon...');
       const daemonState = await spawnDaemon({
         targetUrl: config.baseUrl,
@@ -190,7 +200,8 @@ export function createProxyCommand(): Command {
   proxy
     .command('status')
     .description('Show proxy daemon status')
-    .action(async () => {
+    .option('--deep', 'Also verify upstream/auth reachability (slower)')
+    .action(async (opts) => {
       const { running, state } = await checkStatus();
       if (!running || !state) {
         console.log('Status: stopped');
@@ -204,11 +215,29 @@ export function createProxyCommand(): Command {
           ? `${Math.floor(uptimeSec / 60)}m ${uptimeSec % 60}s`
           : `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`;
 
-      console.log(`Status:  ${chalk.green('running')}`);
+      const health = await checkProxyHealth({
+        port: state.port,
+        gatewayKey: state.gatewayKey,
+        deep: Boolean(opts.deep),
+      });
+
+      if (health.healthy) {
+        const label = health.level === 'deep' ? 'running, healthy (upstream OK)' : 'running, healthy';
+        console.log(`Status:  ${chalk.green(label)}`);
+      } else {
+        console.log(`Status:  ${chalk.yellow('running but UNHEALTHY')}`);
+        console.log(`  Reason:  ${health.reason ?? state.healthReason ?? 'unknown'}`);
+      }
+
       console.log(`  URL:     ${state.url}`);
       console.log(`  Port:    ${state.port}`);
       console.log(`  Profile: ${state.profile}`);
       console.log(`  Uptime:  ${uptime}`);
+
+      // Surface a recorded give-up reason even when a fresh ping happens to pass.
+      if (state.health === 'unhealthy' && state.healthReason && health.healthy) {
+        console.log(chalk.yellow(`  Note:    last recorded issue — ${state.healthReason}`));
+      }
     });
 
   // ── proxy connect ────────────────────────────────────────────────────────────
@@ -220,14 +249,36 @@ export function createProxyCommand(): Command {
     .description('Configure Claude Desktop (3P) to use the local proxy')
     .option('--profile <name>', 'Profile whose credentials to use for Claude Desktop proxy')
     .option('--verbose', 'Show detailed connection info (URLs, config paths) for debugging')
+    .option('--force', 'Stop any existing proxy and start a fresh one, even if it looks healthy')
     .action(async (opts) => {
       const verbose: boolean = Boolean(opts.verbose);
       let startedInThisRun = false;
       try {
+        const force: boolean = Boolean(opts.force);
         let { running, state } = await checkStatus();
 
-        if (running && state?.telemetryMode !== 'claude-desktop') {
-          console.log('Restarting proxy in Claude Desktop mode...');
+        const wrongMode = running && state?.telemetryMode !== 'claude-desktop';
+        let unhealthy = false;
+        if (running && state && state.telemetryMode === 'claude-desktop' && !force) {
+          const health = await checkProxyHealth({
+            port: state.port,
+            gatewayKey: state.gatewayKey,
+            deep: true,
+          });
+          unhealthy = !health.healthy;
+          if (unhealthy) {
+            console.log(
+              chalk.yellow(`Existing proxy is unhealthy (${health.reason ?? 'unknown'}). Restarting...`)
+            );
+          }
+        }
+
+        if (running && (wrongMode || unhealthy || force)) {
+          if (force) {
+            console.log('Forcing a fresh proxy restart...');
+          } else if (wrongMode) {
+            console.log('Restarting proxy in Claude Desktop mode...');
+          }
           await stopDaemon();
           running = false;
           state = null;
@@ -277,6 +328,11 @@ export function createProxyCommand(): Command {
             })
           );
           await verifySsoCredentials(config.baseUrl, config.name ?? 'default');
+          const cwd = process.cwd();
+          await Promise.allSettled([
+            syncRegisteredSkills(config.name ?? 'default', cwd),
+            syncPluginSkills(),
+          ]);
           state = await spawnDaemon({
             targetUrl: config.baseUrl,
             provider: config.provider ?? 'ai-run-sso',
@@ -309,7 +365,26 @@ export function createProxyCommand(): Command {
           );
         }
 
-        const configPath = await writeDesktopConfig(state!.url, state!.gatewayKey);
+        const canonical = state!.syncCodeMieUrl
+          ? await fetchManagedMcpServers('claude-desktop', state!.syncCodeMieUrl)
+          : null;
+        const orgMcpServers = canonical ? mapCanonicalToDesktop(canonical) : null;
+        logger.info(
+          '[proxy] Resolved managed MCP servers for Claude Desktop',
+          ...sanitizeLogArgs({
+            codeMieUrl: state!.syncCodeMieUrl,
+            fetchSucceeded: canonical !== null,
+            canonicalCount: canonical?.length ?? 0,
+            mappedCount: orgMcpServers?.length ?? 0,
+            mappedNames: orgMcpServers?.map((s) => s.name) ?? [],
+          })
+        );
+        const configPath = await writeDesktopConfig(
+          state!.url,
+          state!.gatewayKey,
+          getDesktopBaseDir(),
+          orgMcpServers
+        );
         logger.info(
           '[proxy] Claude Desktop proxy configuration written',
           ...sanitizeLogArgs({

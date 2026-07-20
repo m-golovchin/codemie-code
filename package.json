@@ -1,18 +1,21 @@
 {
   "name": "@codemieai/code",
-  "version": "0.1.0",
+  "version": "0.9.0",
   "description": "Unified AI coding assistant CLI - Manage Claude Code, Gemini & custom agents. Multi-provider support (OpenAI, Azure, LiteLLM, SSO). Built-in LangGraph agent with file operations & git integration.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "codemie": "./bin/codemie.js",
+    "code": "./bin/codemie.js",
     "codemie-code": "./bin/agent-executor.js",
     "codemie-claude": "./bin/codemie-claude.js",
     "codemie-claude-acp": "./bin/codemie-claude-acp.js",
     "codemie-gemini": "./bin/codemie-gemini.js",
     "codemie-opencode": "./bin/codemie-opencode.js",
     "codemie-codex": "./bin/codemie-codex.js",
+    "codemie-kimi": "./bin/codemie-kimi.js",
+    "codemie-kimi-acp": "./bin/codemie-kimi-acp.js",
     "codemie-mcp-proxy": "./bin/codemie-mcp-proxy.js",
     "proxy-daemon": "./bin/proxy-daemon.js"
   },
@@ -25,22 +28,26 @@
     "LICENSE"
   ],
   "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
     "build": "tsc && tsc-alias && npm run copy-plugin",
     "copy-plugin": "node scripts/copy-plugins.js",
     "prepare:install-artifacts": "node scripts/prepare-install-artifacts.mjs",
     "dev": "tsc --watch",
     "test": "vitest",
-    "test:unit": "vitest run src",
-    "test:integration": "vitest run tests/integration",
-    "test:coverage": "vitest run --coverage",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project cli",
+    "test:integration:cli": "vitest run --project cli",
+    "test:integration:agent": "vitest run --project agent",
+    "test:run": "vitest run --project unit --project cli",
+    "test:all": "vitest run --project unit && vitest run --project cli && vitest run --project agent",
+    "test:coverage": "vitest run --project unit --coverage",
     "test:watch": "vitest --watch",
     "test:ui": "vitest --ui",
-    "test:run": "vitest run",
     "typecheck": "tsc --noEmit",
     "format": "npm run lint:fix",
     "check:pre-commit": "npm run typecheck && npm run lint",
-    "lint": "eslint '{src,tests}/**/*.ts' --max-warnings=0",
-    "lint:fix": "eslint '{src,tests}/**/*.ts' --fix",
+    "lint": "eslint {src,tests}/**/*.ts --max-warnings=0",
+    "lint:fix": "eslint {src,tests}/**/*.ts --fix",
     "commitlint": "commitlint --edit",
     "commitlint:last": "commitlint --from HEAD~1 --to HEAD --verbose",
     "validate:secrets": "node scripts/validate-secrets.js",
@@ -54,7 +61,7 @@
   "lint-staged": {
     "*.ts": [
       "eslint --max-warnings=0 --no-warn-ignored",
-      "vitest related --run"
+      "vitest related --run --exclude tests/integration/agent-*.test.ts --exclude tests/integration/cli-commands/models.test.ts"
     ],
     "package.json": [
       "npm run license-check"
@@ -115,14 +122,15 @@
     "@clack/core": "^0.5.0",
     "@clack/prompts": "^0.11.0",
     "@codemieai/codemie-opencode": "0.0.47",
+    "@iarna/toml": "^2.2.5",
     "@langchain/core": "^1.0.4",
     "@langchain/langgraph": "^1.0.2",
     "@langchain/openai": "^1.1.0",
-    "@modelcontextprotocol/client": "^2.0.0-alpha.2",
-    "@modelcontextprotocol/server": "^2.0.0-alpha.2",
+    "@modelcontextprotocol/client": "2.0.0-alpha.2",
+    "@modelcontextprotocol/server": "2.0.0-alpha.2",
     "chalk": "^5.3.0",
     "cli-table3": "^0.6.5",
-    "codemie-sdk": "^0.1.428",
+    "codemie-sdk": "^0.1.462",
     "commander": "^11.1.0",
     "cors": "^2.8.5",
     "dedent": "^1.7.1",
@@ -158,17 +166,19 @@
     "eslint": "^9.38.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
+    "node-pty": "^1.1.0",
     "tsc-alias": "^1.8.16",
     "typescript": "^5.3.3",
     "vitest": "^4.1.5"
   },
   "overrides": {
-    "form-data": "^4.0.5",
+    "axios": "^1.18.1",
+    "form-data": "^4.0.6",
     "flatted": "^3.4.2",
     "fast-xml-parser": "^5.7.2",
     "path-to-regexp": "^8.4.2",
     "picomatch": "^4.0.4",
-    "vite": "7.3.2",
+    "vite": "7.3.6",
     "micromatch": {
       "picomatch": "^2.3.2"
     }

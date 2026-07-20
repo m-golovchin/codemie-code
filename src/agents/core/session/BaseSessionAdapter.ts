@@ -28,6 +28,7 @@ export interface ParsedSession {
     updatedAt?: string;
     repository?: string;
     branch?: string;
+    gitBranch?: string;
   };
 
   // Raw messages (agent-specific format preserved for conversations processor)
@@ -39,7 +40,9 @@ export interface ParsedSession {
     agentId: string;
     slug?: string;
     filePath: string;
-    messages: unknown[]; // Pre-parsed messages from sub-agent file
+    messages: unknown[];
+    toolUseId?: string;   // from agent-<id>.meta.json — links to parent tool_use.id
+    agentType?: string;   // from agent-<id>.meta.json — the agent type string
   }>;
 
   // Parsed metrics data (optional - for metrics processor)
@@ -47,11 +50,20 @@ export interface ParsedSession {
     tools?: Record<string, number>;
     toolStatus?: Record<string, { success: number; failure: number }>;
     fileOperations?: Array<{
-      type: 'write' | 'edit' | 'delete';
-      path: string;
+      type: string;
+      path?: string;
+      format?: string;
+      language?: string;
+      pattern?: string;
       linesAdded?: number;
       linesRemoved?: number;
     }>;
+    // Named invocation breakdowns (skill names, agent subtypes, slash commands)
+    skillInvocations?: Record<string, number>;
+    agentInvocations?: Record<string, number>;
+    commandInvocations?: Record<string, number>;
+    // User prompts captured for this session/turn
+    userPrompts?: Array<{ count: number; text: string }>;
   };
 }
 

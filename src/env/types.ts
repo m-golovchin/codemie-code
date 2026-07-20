@@ -3,6 +3,12 @@
  */
 
 import type { HooksConfiguration } from '../hooks/types.js';
+import type { CanonicalReasoningEffort } from '../agents/core/types.js';
+
+export enum StorageScope {
+  GLOBAL = 'global',
+  LOCAL = 'local',
+}
 
 /**
  * Minimal CodeMie integration info for config storage
@@ -23,6 +29,7 @@ export interface CodemieAssistant {
   project?: string;
   registeredAt: string;
   registrationMode?: 'agent' | 'skill';
+  agentTargets?: Array<'claude' | 'codex' | 'gemini'>;
 }
 
 /**
@@ -33,8 +40,9 @@ export interface CodemieSkill {
   name: string;
   slug: string;
   description: string;
-  project: string;
+  project?: string;
   registeredAt: string;
+  agentTargets?: Array<'claude' | 'codex' | 'gemini'>;
 }
 
 /**
@@ -46,6 +54,8 @@ export interface ProviderProfile {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  /** Reasoning/thinking effort level. Persisted profile default; CLI flag overrides. */
+  reasoningEffort?: CanonicalReasoningEffort;
 
   // Claude model tier configuration (maps to ANTHROPIC_DEFAULT_*_MODEL)
   haikuModel?: string;
@@ -61,7 +71,7 @@ export interface ProviderProfile {
   authMethod?: 'manual' | 'sso' | 'jwt' | 'api-key';
   codeMieUrl?: string;
   codeMieProject?: string;  // Selected project/application name
-  codemieAssistants?: CodemieAssistant[];
+  userEmail?: string;       // Authenticated user's email
   codeMieIntegration?: CodeMieIntegrationInfo;
   ssoConfig?: {
     apiUrl?: string;
@@ -74,6 +84,9 @@ export interface ProviderProfile {
     tokenEnvVar?: string;
     expiresAt?: number;
   };
+  // Keycloak / SSO auth fields (required by SDK for SSO; not used with jwt_token)
+  authServerUrl?: string;
+  authRealm?: string;
 
   // AWS Bedrock-specific fields
   awsProfile?: string;
@@ -110,8 +123,8 @@ export interface ProviderProfile {
     maxHistoryMessages?: number; // Maximum conversation turns to load (default: 10, which loads 20 messages = 10 user + 10 AI)
   };
 
-  // Skills configuration
-  codemieSkills?: CodemieSkill[];
+  // In-memory assistants/skills state (not persisted here; stored at MultiProviderConfig level)
+  codemieAssistants?: CodemieAssistant[];
 
   // Skills search — internal catalog endpoint used by `codemie skills find`.
   // Overridden by the CODEMIE_SKILLS_SEARCH_URL env var. When unset, the
@@ -120,7 +133,7 @@ export interface ProviderProfile {
   skillsSearchUrl?: string;
 
   // Claude Code-specific settings
-  claudeAutocompactPct?: number; // Auto-compact threshold percentage (sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, default: 70)
+  claudeAutocompactPct?: number; // Auto-compact threshold percentage (sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, default: 85)
 }
 
 /**
@@ -138,7 +151,6 @@ export interface LegacyConfig {
   authMethod?: 'manual' | 'sso' | 'jwt' | 'api-key';
   codeMieUrl?: string;
   codeMieProject?: string;  // Selected project/application name
-  codemieAssistants?: CodemieAssistant[];
   codeMieIntegration?: CodeMieIntegrationInfo;
   ssoConfig?: {
     apiUrl?: string;
@@ -157,6 +169,9 @@ export interface LegacyConfig {
 export interface MultiProviderConfig {
   version: 2;
   activeProfile: string;
+  codemieSkills?: CodemieSkill[];
+  codemieAssistants?: CodemieAssistant[];
+  userEmail?: string;
   profiles: Record<string, ProviderProfile>;
 }
 

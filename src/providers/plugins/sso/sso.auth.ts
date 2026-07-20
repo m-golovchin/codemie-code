@@ -13,6 +13,15 @@ import type { SSOAuthConfig, SSOAuthResult, SSOCredentials } from '../../core/ty
 import { CredentialStore } from '../../../utils/security.js';
 import { ensureApiBase } from '../../core/codemie-auth-helpers.js';
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
 /**
  * Normalize URL to base (protocol + host)
  * E.g., https://host.com/path -> https://host.com
@@ -24,6 +33,30 @@ function normalizeToBase(url: string): string {
   } catch {
     return url;
   }
+}
+
+/**
+ * Derive credential expiresAt from codemie_access_token JWT exp claim.
+ * Falls back to 24h when the cookie is absent or the JWT cannot be decoded.
+ */
+export function deriveExpiresAt(cookies: Record<string, string>): number {
+  const DEFAULT_TTL = 24 * 60 * 60 * 1000;
+  if (cookies.codemie_access_token) {
+    try {
+      const parts = cookies.codemie_access_token.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(
+          Buffer.from(parts[1], 'base64').toString('utf8'),
+        );
+        if (payload.exp && typeof payload.exp === 'number') {
+          return payload.exp * 1000;
+        }
+      }
+    } catch {
+      // malformed JWT — fall through to default
+    }
+  }
+  return Date.now() + DEFAULT_TTL;
 }
 
 /**
@@ -87,7 +120,7 @@ export class CodeMieSSO {
         const credentials: SSOCredentials = {
           cookies: result.cookies,
           apiUrl: result.apiUrl,
-          expiresAt: Date.now() + (24 * 60 * 60 * 1000) // 24 hours
+          expiresAt: deriveExpiresAt(result.cookies),
         };
 
         const store = CredentialStore.getInstance();
@@ -232,7 +265,7 @@ export class CodeMieSSO {
                 </script>` : `
                 <h2 class="error">❌ Authentication Failed</h2>
                 <p>You can close this window and return to your terminal.</p>
-                ${result.error ? `<p class="error">Error: ${result.error}</p>` : ''}`
+                ${result.error ? `<p class="error">Error: ${escapeHtml(result.error)}</p>` : ''}`
                 }
               </body>
             </html>
@@ -254,7 +287,7 @@ export class CodeMieSSO {
               </head>
               <body>
                 <h2>❌ Authentication Failed</h2>
-                <p>Error: ${error.message}</p>
+                <p>Error: ${escapeHtml(error.message)}</p>
                 <p>You can close this window and return to your terminal.</p>
               </body>
             </html>
